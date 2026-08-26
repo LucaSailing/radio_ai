@@ -3,4 +3,4 @@ numpy
 matplotlib
 opencv-python
 google-cloud-storage
-sklearn
+scikit-learn
