@@ -28,7 +28,7 @@ from radio_ai_package.ml_logic.preprocessors.preprocessor_CNN import filtering, 
 from radio_ai_package.ml_logic.viz import show_train_samples, show_predictions
 
 # Imports de Modibo / Merwan (modèle)
-from radio_ai_package.ml_logic.models.performance_metrics import (initialize_model, compile_model,
+from radio_ai_package.ml_logic.models.model_CNN import (initialize_model, compile_model,
                                                         train_model, evaluate_model, save_model)
 
 # Imports de Mariana (performance metrics)
@@ -148,6 +148,12 @@ model.summary()
 
 model, history = train_model(model, train_ds, val_ds,
                              y_train=data_train['fracture_visible'])
+
+
+
+
+
+
 
 
 

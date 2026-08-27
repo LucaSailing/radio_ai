@@ -12,7 +12,7 @@ setup(name='radio_ai_package',
       # url="https://github.com/LucaSailing/radio_ai",
       install_requires=requirements,
       packages=find_packages(),
-      licence="MIT"
+      licence="MIT",
       # include_package_data: to install data from GRAZPEDWRI database
       include_package_data=True,
       zip_safe=False)
