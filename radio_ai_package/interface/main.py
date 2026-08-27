@@ -35,7 +35,11 @@ from radio_ai_package.ml_logic.models.model_CNN import (initialize_model, compil
 
 
 
-
+# Imports de Mariana (performance metrics)
+from radio_ai_package.ml_logic.models.model_CNN import get_user_threshold, get_predictions, get_x_test, get_y_test, get_binary_predictions
+from radio_ai_package.ml_logic.models.model_CNN import get_confusion_matrix, confusion_matrix_display_predicted
+from radio_ai_package.ml_logic.models.model_CNN import comparing_metrics_predictions, get_classification_report
+from radio_ai_package.ml_logic.models.model_CNN import pr_curve, plot_pr_curve, get_roc_auc_analysis
 
 # ============================================================================
 #  Helpers d'affichage — factorisent le reporting pour un flow lisible
@@ -157,6 +161,12 @@ model, history = train_model(model, train_ds, val_ds,
 
 
 
+
+
+
+
+
+
 # ============================================================================
 #  ZONE DE MARIANA — performance du modèle
 # ============================================================================
@@ -166,6 +176,45 @@ step(5, "Évaluation sur le test")
 results = evaluate_model(model, test_ds)
 save_model(model)
 
+# Generating predictions
+preds = get_predictions(test_ds)
+
+# Getting the threshold
+threshold = get_user_threshold(test_ds)
+
+# Defyning x_test
+X_test = get_x_test(test_ds)
+
+# Defyning y_test
+y_test = get_y_test(test_ds)
+
+# Generating binary predictions (fracture vs no fracture)
+binary_predictions = get_binary_predictions(preds)
+
+# Generating the confusion matrix
+confusion_matrix = get_confusion_matrix(y_test, preds)
+confusion_matrix
+
+cm_drawing = confusion_matrix_display_predicted(y_test, preds)
+cm_drawing
+
+# Comparing metrix
+accuracy, precision, recall, f1 = comparing_metrics_predictions(y_test, preds)
+accuracy, precision, recall, f1
+
+# Classification report
+classification_report = get_classification_report(y_test, preds)
+classification_report
+
+# Precision Recall Curve
+precision_recall_curve = pr_curve(y_test, preds)
+precision_recall_curve
+
+plot_pr_curve(y_test, preds)
+
+# ROC_AUC
+fpr, tpr, thresholds, auc_score, best_threshold_j=get_roc_auc_analysis(y_test, preds)
+fpr, tpr, thresholds, auc_score, best_threshold_j
 
 
 
