@@ -100,3 +100,4 @@ def save_model(model, name="cnn_fracture"):
     model.save(path)
     print(f"Modèle sauvegardé : {path}")
     return path
+
