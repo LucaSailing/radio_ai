@@ -1,5 +1,6 @@
 # ---------- modèle : init, compile, train, evaluate, save ----------
 
+import time
 import tensorflow as tf
 from tensorflow.keras import Sequential, layers, callbacks, optimizers
 from tensorflow.keras.layers import Input
@@ -7,8 +8,8 @@ from sklearn.utils.class_weight import compute_class_weight
 import numpy as np
 from datetime import datetime
 
-from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE,
-                                     LEARNING_RATE, MODEL_DIR)
+from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
+                                     BUCKET_NAME, MODEL_BUCKET_PREFIX)
 
 
 def initialize_model():
@@ -25,6 +26,35 @@ def initialize_model():
     model.add(layers.Dense(1, activation='sigmoid'))     # proba de fracture
     return model
 
+# def initialize_model():
+#     """CNN pour classification binaire de radios en niveaux de gris.
+#     4 blocs conv + GlobalAveragePooling (au lieu de Flatten) + dropout.
+#     Lit IMG_SIZE depuis params.py -> reste synchronisé avec le pipeline."""
+#     model = Sequential([
+#         layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),   # <- IMG_SIZE, pas 256 en dur
+
+#         # Bloc 1
+#         layers.Conv2D(16, (3, 3), padding="same", activation="relu"),
+#         layers.MaxPooling2D(pool_size=(2, 2)),
+
+#         # Bloc 2
+#         layers.Conv2D(32, (3, 3), padding="same", activation="relu"),
+#         layers.MaxPooling2D(pool_size=(2, 2)),
+
+#         # Bloc 3
+#         layers.Conv2D(64, (3, 3), padding="same", activation="relu"),
+#         layers.MaxPooling2D(pool_size=(2, 2)),
+
+#         # Bloc 4
+#         layers.Conv2D(128, (3, 3), padding="same", activation="relu"),
+#         layers.MaxPooling2D(pool_size=(2, 2)),
+
+#         layers.GlobalAveragePooling2D(),        # remplace Flatten
+#         layers.Dense(50, activation="relu"),
+#         layers.Dropout(0.5),
+#         layers.Dense(1, activation="sigmoid"),  # proba de fracture
+#     ])
+#     return model
 
 def compile_model(model):
     """Compile pour classification binaire. Au-delà de l'accuracy (trompeuse
@@ -51,6 +81,23 @@ def compute_class_weights(y):
     classes = np.unique(y)
     weights = compute_class_weight('balanced', classes=classes, y=y)
     return {int(c): float(w) for c, w in zip(classes, weights)}
+
+
+
+def warmup_cache(dataset, nom="dataset"):
+    """Force le remplissage du cache en itérant une fois sur le dataset,
+    sans entraîner. Chronomètre le coût de chargement (téléchargement +
+    décodage) — c'est LE chiffre qui diffère entre local et remote."""
+    t0 = time.time()
+    n_batches = 0
+    n_images = 0
+    for images, labels in dataset:
+        n_batches += 1
+        n_images += images.shape[0]
+    dt = time.time() - t0
+    print(f"  ⏱  cache [{nom}] rempli : {dt:.1f}s "
+          f"({n_images} images, {n_batches} batches, {n_images/dt:.0f} img/s)")
+    return dt
 
 
 def train_model(model, ds_train, ds_val, y_train=None):
