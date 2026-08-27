@@ -8,11 +8,11 @@ requirements = [x.strip() for x in content if "git+" not in x]
 setup(name='radio_ai_package',
       version="0.0.1",
       description="Finding fractures in X-rays",
-      license="MIT",
       author="Luca, Marwan, Modibo and Mariana",
-      #url="https://github.com/LucaSailing/radio_ai",
+      # url="https://github.com/LucaSailing/radio_ai",
       install_requires=requirements,
       packages=find_packages(),
-      # include_package_data: to install data from GRAZPED.in
+      licence="MIT"
+      # include_package_data: to install data from GRAZPEDWRI database
       include_package_data=True,
       zip_safe=False)
