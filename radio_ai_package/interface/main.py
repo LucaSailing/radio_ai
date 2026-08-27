@@ -14,8 +14,8 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # pas de GPU -> TF ne cherche pas le
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)   # masque le FutureWarning
 
-
 # Imports du main
+import time
 import pandas as pd
 import numpy as np
 import sys
@@ -23,16 +23,23 @@ from pathlib import Path
 from radio_ai_package.params import *
 
 # Imports de Luca (data)
-from radio_ai_package.ml_logic.data import load_df_with_local_paths, import_data_bucket
+from radio_ai_package.ml_logic.data import load_data
 from radio_ai_package.ml_logic.preprocessors.preprocessor_CNN import filtering, preprocessing
 from radio_ai_package.ml_logic.viz import show_train_samples, show_predictions
 
 # Imports de Modibo / Merwan (modèle)
 from radio_ai_package.ml_logic.models.model_CNN import (initialize_model, compile_model,
-                                                        train_model, evaluate_model, save_model)
+                                                        train_model, evaluate_model,
+                                                        save_model, warmup_cache)
 
-# Imports de Mariana (perf)
 
+
+
+# Imports de Mariana (performance metrics)
+from radio_ai_package.ml_logic.models.model_CNN import get_user_threshold, get_predictions, get_x_test, get_y_test, get_binary_predictions
+from radio_ai_package.ml_logic.models.model_CNN import get_confusion_matrix, confusion_matrix_display_predicted
+from radio_ai_package.ml_logic.models.model_CNN import comparing_metrics_predictions, get_classification_report
+from radio_ai_package.ml_logic.models.model_CNN import pr_curve, plot_pr_curve, get_roc_auc_analysis
 
 # ============================================================================
 #  Helpers d'affichage — factorisent le reporting pour un flow lisible
@@ -43,7 +50,6 @@ def step(n, titre):
     print("\n" + "=" * 70)
     print(f"  ÉTAPE {n} — {titre}")
     print("=" * 70)
-
 
 def describe_dataset(df, nom):
     """Stats d'un ensemble : taille, équilibre des classes, et ventilation
@@ -75,24 +81,25 @@ def describe_dataset(df, nom):
         for (main, vue), c in grp.items():
             print(f"     {libelle:10s}{main:9s}{vue:11s}{c:6d}{c/n:8.1%}")
 
-
 # ============================================================================
 #  ZONE DE LUCA — chargement des données
 # ============================================================================
+
+_t_start = time.time()   # chrono global du pipeline
 
 # garde-fou : on doit être à la racine du package
 if Path(BASE_DIR).name != "radio_ai":
     sys.exit("ATTENTION : erreur de localisation radio_ai")
 
-step(1, "Chargement des données") # fonction d'affichage dans le terminal de l'avancement
-
-# df = load_df_with_local_paths() # voie rapide : images déjà en local
-df = import_data_bucket()       # voie complète : télécharge depuis bucket (skippe si fichier existe déja en local)
+step(1, "Chargement des données")
+t0 = time.time()
+df = load_data()
+print(f"  ⏱  chargement df : {time.time() - t0:.1f}s")
 
 print(f"\n  Dataset brut chargé : {len(df)} lignes, {df.shape[1]} colonnes")
-print(f"  Exemple de chemin   : ...{df.file_path.sample(1).str[-40:].values[0]}")
+print(f"  Mode : {DATA_MODE}  |  colonne chemins : {PATH_COL}")
+print(f"  Exemple de chemin   : ...{df[PATH_COL].sample(1).str[-40:].values[0]}")
 describe_dataset(df, "dataset brut")
-
 
 # ============================================================================
 #  ZONE DE MODIBO / MERWAN — preprocessing et modèle
@@ -110,6 +117,12 @@ describe_dataset(df_filtered_CNN, "après filtrage")
 
 
 step(3, "Découpage train / val / test")
+(train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
+
+# mesure du coût de remplissage du cache (le vrai différenciateur local/remote)
+print(f"\n  Remplissage du cache (mode : {DATA_MODE}) :")
+warmup_cache(train_ds, "train")
+warmup_cache(val_ds, "val")
 
 # preprocessing renvoie les 3 datasets tf.data + les 3 DataFrames
 (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
@@ -148,6 +161,12 @@ model, history = train_model(model, train_ds, val_ds,
 
 
 
+
+
+
+
+
+
 # ============================================================================
 #  ZONE DE MARIANA — performance du modèle
 # ============================================================================
@@ -157,6 +176,84 @@ step(5, "Évaluation sur le test")
 results = evaluate_model(model, test_ds)
 save_model(model)
 
+# Generating predictions
+preds = get_predictions(test_ds)
+
+# Getting the threshold
+threshold = get_user_threshold(test_ds)
+
+# Defyning x_test
+X_test = get_x_test(test_ds)
+
+# Defyning y_test
+y_test = get_y_test(test_ds)
+
+# Generating binary predictions (fracture vs no fracture)
+binary_predictions = get_binary_predictions(preds)
+
+# Generating the confusion matrix
+confusion_matrix = get_confusion_matrix(y_test, preds)
+confusion_matrix
+
+cm_drawing = confusion_matrix_display_predicted(y_test, preds)
+cm_drawing
+
+# Comparing metrix
+accuracy, precision, recall, f1 = comparing_metrics_predictions(y_test, preds)
+accuracy, precision, recall, f1
+
+# Classification report
+classification_report = get_classification_report(y_test, preds)
+classification_report
+
+# Precision Recall Curve
+precision_recall_curve = pr_curve(y_test, preds)
+precision_recall_curve
+
+plot_pr_curve(y_test, preds)
+
+# ROC_AUC
+fpr, tpr, thresholds, auc_score, best_threshold_j=get_roc_auc_analysis(y_test, preds)
+fpr, tpr, thresholds, auc_score, best_threshold_j
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 print("\n" + "=" * 70)
 print("  PIPELINE TERMINÉ")
@@ -164,3 +261,10 @@ print("=" * 70)
 
 # montre des images de predictions - 1er draft - fonction à améliorer
 show_predictions(model, data_test, test_ds)
+
+
+print("\n" + "=" * 70)
+print("  PIPELINE TERMINÉ")
+total = time.time() - _t_start
+print(f"  Temps total du run : {total:.1f}s  ({total/60:.1f} min)  |  mode : {DATA_MODE}")
+print("=" * 70)

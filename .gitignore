@@ -74,3 +74,4 @@ model/*
 !raw_data/.gitkeep
 #*.ipynb
 *.zip
+*.csv
