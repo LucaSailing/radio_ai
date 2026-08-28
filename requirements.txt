@@ -6,3 +6,7 @@ opencv-python
 google-cloud-storage
 scikit-learn
 tensorflow
+
+# API
+fastapi   # API framework
+uvicorn   # web server
