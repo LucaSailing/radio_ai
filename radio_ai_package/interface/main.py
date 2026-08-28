@@ -38,7 +38,7 @@ from radio_ai_package.ml_logic.performance_metrics import (
     get_user_threshold, get_predictions, get_x_test, get_y_test, get_binary_predictions,
     get_confusion_matrix, confusion_matrix_display_predicted,
     comparing_metrics_predictions, get_classification_report,
-    pr_curve, plot_pr_curve, get_roc_auc_analysis)
+    pr_curve, plot_pr_curve, get_roc_auc_analysis, plot_training_history)
 
 
 # ============================================================================
@@ -161,6 +161,10 @@ results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
 # ============================================================================
 #  ZONE DE MARIANA — performance détaillée
 # ============================================================================
+
+# looking at how the model is behaving
+plot_training_history(history)
+
 
 # seuil demandé UNE fois, puis propagé à toutes les métriques
 threshold = get_user_threshold(default=0.5)
