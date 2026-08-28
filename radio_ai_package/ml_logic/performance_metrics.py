@@ -195,11 +195,13 @@ def get_roc_auc_analysis(y_test, preds, filename="roc_curve.png"):
 
 
 ################################### History plot ###############################
-def plot_training_history(history):
+def plot_training_history(history, filename="training_history.png"):
     """
     Plots Training vs Validation Loss, Recall, and Accuracy in a 1x3 grid.
     Marks the best epoch based on minimum validation loss.
     """
+    VIZ_DIR.mkdir(parents=True, exist_ok=True)
+
     epochs = range(1, len(history.history['loss']) + 1)
     best_epoch = np.argmin(history.history['val_loss']) + 1
     best_val_loss = history.history['val_loss'][best_epoch - 1]
@@ -251,4 +253,7 @@ def plot_training_history(history):
 
     plt.suptitle('CNN Training & Validation Metrics', fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
+
+    out = VIZ_DIR / filename
+    fig.savefig(out, bbox_inches="tight", dpi=120)
     plt.show()

@@ -168,6 +168,7 @@ def train_model(model, ds_train, ds_val, y_train=None):
         class_weight=class_weight,
         callbacks=cbs,
         verbose=1
+        metrics = ['loss', 'accuracy', 'recall']
     )
     return model, history
 
