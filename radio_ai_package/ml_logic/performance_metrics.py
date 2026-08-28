@@ -192,3 +192,63 @@ def get_roc_auc_analysis(y_test, preds, filename="roc_curve.png"):
     print(f"  Figure enregistrée : {out}")
 
     return fpr, tpr, thresholds, auc_score, best_threshold_j
+
+
+################################### History plot ###############################
+def plot_training_history(history):
+    """
+    Plots Training vs Validation Loss, Recall, and Accuracy in a 1x3 grid.
+    Marks the best epoch based on minimum validation loss.
+    """
+    epochs = range(1, len(history.history['loss']) + 1)
+    best_epoch = np.argmin(history.history['val_loss']) + 1
+    best_val_loss = history.history['val_loss'][best_epoch - 1]
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # ==========================================
+    # 1. LOSS PLOT
+    # ==========================================
+    axes[0].plot(epochs, history.history['loss'], label='Train Loss', color='#1f77b4', linewidth=2)
+    axes[0].plot(epochs, history.history['val_loss'], label='Val Loss', color='#ff7f0e', linewidth=2, linestyle='--')
+    axes[0].axvline(best_epoch, color='red', linestyle=':', label=f'Best Epoch ({best_epoch})')
+    axes[0].scatter(best_epoch, best_val_loss, color='red', s=50, zorder=5)
+
+    axes[0].set_title('Binary Crossentropy Loss', fontsize=12, fontweight='bold')
+    axes[0].set_xlabel('Epochs')
+    axes[0].set_ylabel('Loss')
+    axes[0].legend(frameon=True, loc='upper right')
+    axes[0].grid(True, linestyle='--', alpha=0.6)
+
+    # ==========================================
+    # 2. RECALL PLOT
+    # ==========================================
+    axes[1].plot(epochs, history.history['recall'], label='Train Recall', color='#2ca02c', linewidth=2)
+    axes[1].plot(epochs, history.history['val_recall'], label='Val Recall', color='#d62728', linewidth=2, linestyle='--')
+    axes[1].axvline(best_epoch, color='red', linestyle=':', label=f'Best Epoch ({best_epoch})')
+
+    axes[1].set_title('Model Recall', fontsize=12, fontweight='bold')
+    axes[1].set_xlabel('Epochs')
+    axes[1].set_ylabel('Recall')
+    axes[1].legend(frameon=True, loc='lower right')
+    axes[1].grid(True, linestyle='--', alpha=0.6)
+
+    # ==========================================
+    # 3. ACCURACY PLOT
+    # ==========================================
+    acc_key = 'accuracy' if 'accuracy' in history.history else 'acc'
+    val_acc_key = f'val_{acc_key}'
+
+    axes[2].plot(epochs, history.history[acc_key], label='Train Accuracy', color='#9467bd', linewidth=2)
+    axes[2].plot(epochs, history.history[val_acc_key], label='Val Accuracy', color='#8c564b', linewidth=2, linestyle='--')
+    axes[2].axvline(best_epoch, color='red', linestyle=':', label=f'Best Epoch ({best_epoch})')
+
+    axes[2].set_title('Model Accuracy', fontsize=12, fontweight='bold')
+    axes[2].set_xlabel('Epochs')
+    axes[2].set_ylabel('Accuracy')
+    axes[2].legend(frameon=True, loc='lower right')
+    axes[2].grid(True, linestyle='--', alpha=0.6)
+
+    plt.suptitle('CNN Training & Validation Metrics', fontsize=14, fontweight='bold', y=1.02)
+    plt.tight_layout()
+    plt.show()
