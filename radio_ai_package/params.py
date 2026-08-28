@@ -16,8 +16,8 @@ RAW_DATA_BUCKET_PREFIX = "raw_data"    # gs://<bucket>/raw_data/
 MODEL_BUCKET_PREFIX = "models"         # gs://<bucket>/models/
 
 # paramètres de preprocessing
-#IMG_SIZE = (256, 256)
-IMG_SIZE = (384, 384)
+IMG_SIZE = (256, 256)
+#IMG_SIZE = (384, 384)
 #IMG_SIZE = (512, 512)
 BATCH_SIZE = 16                 # renommé (était BATCH)
 TEST_SIZE = 0.15
@@ -26,7 +26,7 @@ RANDOM_STATE = 42
 
 # paramètres de modèle
 LEARNING_RATE = 1e-3            # ajouté (requis par model_CNN)
-EPOCHS = 40
+EPOCHS = 1
 PATIENCE = 10                    # abaissé pour être < EPOCHS
 
 
