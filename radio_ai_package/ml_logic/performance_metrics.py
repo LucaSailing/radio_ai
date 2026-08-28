@@ -1,207 +1,194 @@
+# ============================================================================
+#  performance_metrics.py — métriques et courbes de performance (radio_ai)
+# ============================================================================
+
+import sys
+
+import matplotlib
+matplotlib.use("Agg")            # backend headless (WSL sans écran) -> savefig, pas show
 import matplotlib.pyplot as plt
-import pandas as pd
 import numpy as np
+import pandas as pd
 
-from radio_ai_package.ml_logic.registry import load_model
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
-from sklearn.metrics import precision_recall_curve
-from sklearn.metrics import PrecisionRecallDisplay
-from sklearn.metrics import roc_curve
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import classification_report
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                             ConfusionMatrixDisplay,
+                             precision_recall_curve, PrecisionRecallDisplay,
+                             roc_curve, roc_auc_score, classification_report)
 
-########################## Getting threhold from user ##########################
+from radio_ai_package.params import RAW_DATA_DIR
+
+VIZ_DIR = RAW_DATA_DIR / "viz"
+
+
+# ---------- seuil de décision ----------
+
 def get_user_threshold(default=0.5):
-    """
-    Prompts the user to enter a classification threshold between 0.0 and 1.0.
-    Falls back to `default` if the user presses Enter or inputs invalid data.
-    """
+    """Demande un seuil de décision (0.0–1.0). Repli sur `default` si l'entrée
+    est vide/invalide, OU si on n'est pas dans un terminal interactif (VM,
+    pipeline non interactif) — évite de bloquer le run sur un input()."""
+    if not sys.stdin.isatty():
+        print(f"  (non interactif) seuil par défaut : {default}")
+        return default
+
     while True:
-        user_input = input(f"Enter probability threshold (0.0 to 1.0) [default: {default}]: ").strip()
-
-        # Fallback to default if input is empty
+        user_input = input(f"Seuil de probabilité (0.0 à 1.0) [défaut {default}] : ").strip()
         if not user_input:
-            print(f"-> Using default threshold: {default}")
+            print(f"  -> seuil par défaut : {default}")
             return default
-
         try:
             threshold = float(user_input)
             if 0.0 <= threshold <= 1.0:
-                print(f"-> Selected threshold: {threshold}")
+                print(f"  -> seuil retenu : {threshold}")
                 return threshold
-            else:
-                print("Error: Threshold must be between 0.0 and 1.0. Please try again.")
+            print("  seuil hors bornes (0.0–1.0), réessaie.")
         except ValueError:
-            print("Error: Invalid number format. Please enter a float (e.g., 0.35).")
+            print("  format invalide, entre un flottant (ex. 0.35).")
 
 
-######################### Defyining y_test, preds, x_test ######################
-def get_predictions (test_ds):
-    model = load_model()
-    preds = model.predict(test_ds)
-    return preds
+# ---------- prédictions ----------
 
-def get_x_test(test_ds):
-    '''Extract all image batches (x) into stacked arrays'''
-    X_test = np.concatenate([x.numpy() for x, _ in test_ds)], axis=0)
-    print("X_test shape:", X_test.shape)
-    return X_test
+def get_predictions(model, test_ds):
+    """Probabilités continues prédites sur le test. On passe le modèle déjà en
+    mémoire (entraîné ou chargé du bucket) au lieu d'en recharger un — cohérent
+    avec le pipeline, pas de double chargement."""
+    return model.predict(test_ds)
+
 
 def get_y_test(test_ds):
-    '''Extract all image label batches (y) into stacked arrays'''
-    y_test = np.concatenate([y for x, y in test_ds)], axis=0)
-    print("X\y_test shape:", y_test.shape)
+    """Étiquettes réelles du test, empilées en 1D. L'ordre suit l'itération du
+    dataset ; test_ds n'étant PAS shuffle, il reste aligné avec get_predictions."""
+    y_test = np.concatenate([y for _, y in test_ds], axis=0)
+    print("  y_test shape :", y_test.shape)
     return y_test
 
-def get_binary_predictions(preds):
-    '''flattening preds into 1 dimension and turns them into a binary class
-    taking into account a threshold value for the probabilities of an X-ray to show a fracture'''
-    threshold = get_user_threshold(default=0.5)
-    binary_preds = (preds.flatten() > threshold).astype(int)
-    return binary_preds
 
-############################### Confusion matrix ###############################
-def get_confusion_matrix(y_test, preds):
-    # Confusion matrix
-    y_test = y_test # list of actual truths
-    preds = get_binary_predictions (preds) # list of predictions
-
-    results_df = pd.DataFrame({"actual": y_test,
-                           "predicted": preds}) #Store results in a dataframe
-
-    confusion_matrix = pd.crosstab(index= results_df['actual'],
-                               columns = results_df['predicted'])
-    return confusion_matrix
-
-def confusion_matrix_display_predicted(y_test, preds):
-    preds = get_binary_predictions (preds)
-    ConfusionMatrixDisplay.from_predictions(
-        y_test,
-        preds,
-        display_labels=['Normal (0)', 'Fracture (1)'],
-        cmap=plt.cm.Blues
-    )
-
-    plt.title("Confusion Matrix - Test Set")
-    plt.show()
-    return None
+def get_x_test(test_ds):
+    """Images du test empilées. Optionnel (inspecter des cas) — non requis par
+    les métriques elles-mêmes."""
+    X_test = np.concatenate([x.numpy() for x, _ in test_ds], axis=0)
+    print("  X_test shape :", X_test.shape)
+    return X_test
 
 
-################################ Comparing metrics ##############################
-def comparing_metrics_predictions(y_test, preds):
-    y_true = y_test
-    y_pred_binary = get_binary_predictions(preds)
+def get_binary_predictions(preds, threshold=0.5):
+    """Binarise les probabilités selon un seuil DONNÉ. Le seuil est décidé une
+    seule fois en amont et propagé, pour que toutes les métriques soient
+    cohérentes entre elles (pas de seuil redemandé à chaque fonction)."""
+    return (preds.flatten() > threshold).astype(int)
 
-    accuracy = round(accuracy_score(y_true, y_pred_binary), 2) # Accuracy
-    precision = round(precision_score(y_true, y_pred_binary), 2) # Precision
-    recall = round(recall_score(y_true, y_pred_binary), 2) # Recall
-    f1 = round(f1_score(y_true, y_pred_binary), 2) # F1 score
 
-    print(f'Accuracy = {accuracy}') # Accuracy
-    print(f'Precision = {precision}')
-    print(f'Recall = {recall}')
-    print(f'F1 score = {f1}')
+# ---------- matrice de confusion ----------
+
+def get_confusion_matrix(y_test, binary_preds):
+    """Matrice de confusion en tableau croisé pandas (prédictions binarisées)."""
+    results_df = pd.DataFrame({"actual": np.asarray(y_test).flatten(),
+                               "predicted": np.asarray(binary_preds).flatten()})
+    return pd.crosstab(results_df['actual'], results_df['predicted'])
+
+
+def confusion_matrix_display_predicted(y_test, binary_preds, filename="confusion_matrix.png"):
+    """Enregistre la matrice de confusion en PNG (pas de show en WSL)."""
+    VIZ_DIR.mkdir(parents=True, exist_ok=True)
+    disp = ConfusionMatrixDisplay.from_predictions(
+        np.asarray(y_test).flatten(),
+        np.asarray(binary_preds).flatten(),
+        display_labels=['Sain (0)', 'Fracture (1)'],
+        cmap=plt.cm.Blues)
+    disp.ax_.set_title("Matrice de confusion — test")
+    out = VIZ_DIR / filename
+    disp.figure_.savefig(out, bbox_inches="tight", dpi=120)
+    plt.close(disp.figure_)
+    print(f"  Figure enregistrée : {out}")
+    return out
+
+
+# ---------- métriques scalaires ----------
+
+def comparing_metrics_predictions(y_test, binary_preds):
+    """Accuracy, precision, recall, F1 (prédictions binarisées)."""
+    y_true = np.asarray(y_test).flatten()
+    y_pred = np.asarray(binary_preds).flatten()
+
+    accuracy  = round(accuracy_score(y_true, y_pred), 2)
+    precision = round(precision_score(y_true, y_pred, zero_division=0), 2)
+    recall    = round(recall_score(y_true, y_pred, zero_division=0), 2)
+    f1        = round(f1_score(y_true, y_pred, zero_division=0), 2)
+
+    print(f"  Accuracy  = {accuracy}")
+    print(f"  Precision = {precision}")
+    print(f"  Recall    = {recall}")
+    print(f"  F1 score  = {f1}")
     return accuracy, precision, recall, f1
 
-############################# Classification report ############################
-'''Classification report performed using MY predictions:
-It evaluates only the data on the test set;
-The prediction source is only a single model trained once on X_train;
-Higher risk of luck based on how hte split landed'''
 
-def get_classification_report (y_test, preds):
-    y_pred_binary = get_binary_predictions(preds)
-
-    # Print the classification report
-    classif = (classification_report(
-        y_test,
-        y_pred_binary,
-        target_names=['Normal (0)', 'fracture (1)'],
-        digits = 2
-    ))
-    print(classif)
-    return classif
+def get_classification_report(y_test, binary_preds):
+    """Rapport de classification sklearn (précision/rappel/F1 par classe)."""
+    report = classification_report(
+        np.asarray(y_test).flatten(),
+        np.asarray(binary_preds).flatten(),
+        target_names=['Sain (0)', 'Fracture (1)'],
+        digits=2, zero_division=0)
+    print(report)
+    return report
 
 
-############################# Precision Recall Curve ###########################
-def pr_curve (y_test, preds):
-    y_pred_binary = get_binary_predictions(preds)
-    return precision_recall_curve(y_test, y_pred_binary)
+# ---------- courbes (probabilités continues, PAS binarisées) ----------
 
-def plot_pr_curve(y_test, preds):
-    '''Pass raw continuous probabilities, NOT binary 0/1 predictions)'''
-    # Ensure inputs are 1D arrays
-    y_true_1d = y_test.flatten()
-    y_probs_1d = preds.flatten()
+def pr_curve(y_test, preds):
+    """(precision, recall, thresholds) sur probabilités continues."""
+    return precision_recall_curve(np.asarray(y_test).flatten(),
+                                  np.asarray(preds).flatten())
 
-    # Create display and plot
+
+def plot_pr_curve(y_test, preds, filename="pr_curve.png"):
+    """Courbe précision-rappel en PNG. Utilise les probabilités continues
+    (surtout pas les prédictions binarisées)."""
+    VIZ_DIR.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(figsize=(7, 5))
-    disp = PrecisionRecallDisplay.from_predictions(
-        y_true_1d,
-        y_probs_1d,
-        name="CNN Model",
-        ax=ax
-    )
-    plt.title("Precision-Recall Curve")
-    plt.grid(True, linestyle="--", alpha=0.6)
-    plt.show()
+    PrecisionRecallDisplay.from_predictions(
+        np.asarray(y_test).flatten(),
+        np.asarray(preds).flatten(),
+        name="CNN", ax=ax)
+    ax.set_title("Courbe précision-rappel")
+    ax.grid(True, linestyle="--", alpha=0.6)
+    out = VIZ_DIR / filename
+    fig.savefig(out, bbox_inches="tight", dpi=120)
+    plt.close(fig)
+    print(f"  Figure enregistrée : {out}")
+    return out
 
-###################################### ROC-AUC #################################
-def get_roc_auc_analysis(y_test, preds):
-    """
-    Computes ROC-AUC, calculates the optimal decision threshold via Youden's J statistic,
-    and plots the ROC curve.
 
-    y_true: Ground truth binary labels (0 or 1)
-    y_probs: Continuous probability predictions (0.0 to 1.0)
-    """
-    # 1. Flatten inputs to ensure 1D compatibility
-    y_true_1d = np.array(y_test).flatten()
-    y_probs_1d = np.array(preds).flatten()
+def get_roc_auc_analysis(y_test, preds, filename="roc_curve.png"):
+    """ROC-AUC + seuil optimal (Youden's J = TPR - FPR), courbe ROC en PNG.
+    Retourne (fpr, tpr, thresholds, auc_score, best_threshold_j)."""
+    VIZ_DIR.mkdir(parents=True, exist_ok=True)
+    y_true = np.asarray(y_test).flatten()
+    y_probs = np.asarray(preds).flatten()
 
-    # 2. Extract metrics and thresholds
-    fpr, tpr, thresholds = roc_curve(y_true_1d, y_probs_1d)
-    auc_score = roc_auc_score(y_true_1d, y_probs_1d)
+    fpr, tpr, thresholds = roc_curve(y_true, y_probs)
+    auc_score = roc_auc_score(y_true, y_probs)
 
-    # 3. Compute Youden's J statistic (J = Sensitivity + Specificity - 1 = TPR - FPR)
     j_scores = tpr - fpr
-    best_idx = np.argmax(j_scores)
+    best_idx = int(np.argmax(j_scores))
     best_threshold_j = thresholds[best_idx]
 
-    # Print summary metrics
-    print(f"AUC Score: {auc_score:.4f}")
-    print(f"Optimal Threshold (Youden's J): {best_threshold_j:.4f}")
-    print(f"At this threshold -> TPR (Sensitivity): {tpr[best_idx]:.4f}, FPR (1-Specificity): {fpr[best_idx]:.4f}")
+    print(f"  AUC : {auc_score:.4f}")
+    print(f"  Seuil optimal (Youden's J) : {best_threshold_j:.4f}")
+    print(f"  À ce seuil -> TPR {tpr[best_idx]:.4f} | FPR {fpr[best_idx]:.4f}")
 
-    # 4. Plot the ROC curve
-    plt.figure(figsize=(8, 6))
-
-    # Main ROC curve line
-    plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC Curve (AUC = {auc_score:.3f})')
-
-    # Diagonal baseline (random classifier)
-    plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Random Classifier (AUC = 0.50)')
-
-    # Highlight optimal point
-    plt.scatter(
-        fpr[best_idx],
-        tpr[best_idx],
-        color='red',
-        s=100,
-        zorder=5,
-        label=f'Optimal Threshold = {best_threshold_j:.3f}'
-    )
-
-    # Formatting plot labels and boundaries
-    plt.xlim([0.0, 1.0])
-    plt.ylim([0.0, 1.05])
-    plt.xlabel('False Positive Rate (1 - Specificity)')
-    plt.ylabel('True Positive Rate (Recall / Sensitivity)')
-    plt.title('Receiver Operating Characteristic (ROC) Curve')
-    plt.legend(loc='lower right')
-    plt.grid(True, alpha=0.3)
-
-    plt.show()
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC (AUC = {auc_score:.3f})')
+    ax.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--', label='Aléatoire (0.50)')
+    ax.scatter(fpr[best_idx], tpr[best_idx], color='red', s=100, zorder=5,
+               label=f'Seuil optimal = {best_threshold_j:.3f}')
+    ax.set_xlim([0.0, 1.0]); ax.set_ylim([0.0, 1.05])
+    ax.set_xlabel('Taux de faux positifs (1 - spécificité)')
+    ax.set_ylabel('Taux de vrais positifs (rappel / sensibilité)')
+    ax.set_title('Courbe ROC')
+    ax.legend(loc='lower right'); ax.grid(True, alpha=0.3)
+    out = VIZ_DIR / filename
+    fig.savefig(out, bbox_inches="tight", dpi=120)
+    plt.close(fig)
+    print(f"  Figure enregistrée : {out}")
 
     return fpr, tpr, thresholds, auc_score, best_threshold_j

@@ -1,30 +1,34 @@
 # ---------- modèle : init, compile, train, evaluate, save ----------
 
 import time
+import tempfile
+from datetime import datetime
+
+import numpy as np
 import tensorflow as tf
+from tensorflow import keras
 from tensorflow.keras import Sequential, layers, callbacks, optimizers
 from tensorflow.keras.layers import Input
 from sklearn.utils.class_weight import compute_class_weight
-import numpy as np
-from datetime import datetime
+from google.cloud import storage
 
 from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
                                      BUCKET_NAME, MODEL_BUCKET_PREFIX)
 
 
-def initialize_model():
-    """CNN pour classification binaire de radios en niveaux de gris.
-    Entrée 528x528x1, sortie sigmoïde (proba de fracture)."""
-    model = Sequential()
-    model.add(Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)))
-    model.add(layers.Conv2D(16, (3, 3), padding='same', activation="relu"))
-    model.add(layers.MaxPool2D(pool_size=(2, 2)))
-    model.add(layers.Conv2D(32, (2, 2), padding='same', activation="relu"))
-    model.add(layers.MaxPool2D(pool_size=(2, 2)))
-    model.add(layers.Flatten())
-    model.add(layers.Dense(50, activation='relu'))       # couche intermédiaire
-    model.add(layers.Dense(1, activation='sigmoid'))     # proba de fracture
-    return model
+# def initialize_model():
+#     """CNN pour classification binaire de radios en niveaux de gris.
+#     Entrée 528x528x1, sortie sigmoïde (proba de fracture)."""
+#     model = Sequential()
+#     model.add(Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)))
+#     model.add(layers.Conv2D(16, (3, 3), padding='same', activation="relu"))
+#     model.add(layers.MaxPool2D(pool_size=(2, 2)))
+#     model.add(layers.Conv2D(32, (2, 2), padding='same', activation="relu"))
+#     model.add(layers.MaxPool2D(pool_size=(2, 2)))
+#     model.add(layers.Flatten())
+#     model.add(layers.Dense(50, activation='relu'))       # couche intermédiaire
+#     model.add(layers.Dense(1, activation='sigmoid'))     # proba de fracture
+#     return model
 
 # def initialize_model():
 #     """CNN pour classification binaire de radios en niveaux de gris.
@@ -50,11 +54,50 @@ def initialize_model():
 #         layers.MaxPooling2D(pool_size=(2, 2)),
 
 #         layers.GlobalAveragePooling2D(),        # remplace Flatten
+
 #         layers.Dense(50, activation="relu"),
 #         layers.Dropout(0.5),
 #         layers.Dense(1, activation="sigmoid"),  # proba de fracture
 #     ])
 #     return model
+
+
+def initialize_model():
+    """CNN binaire (radios niveaux de gris). Bloc d'augmentation (actif à
+    l'entraînement seulement) puis Conv -> BatchNorm -> ReLU par bloc."""
+
+    def conv_block(x_filters):
+        return [
+            layers.Conv2D(x_filters, (3, 3), padding="same", use_bias=False),
+            layers.BatchNormalization(),
+            layers.Activation("relu"),
+            layers.MaxPooling2D(pool_size=(2, 2)),
+        ]
+
+    model = Sequential([
+        layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
+
+        # --- augmentation (ne s'applique qu'à l'entraînement) ---
+        layers.RandomFlip("horizontal"),        # poignet G <-> D : miroir valide, label inchangé
+        layers.RandomRotation(0.05),            # ±~18°, petites variations de pose
+        layers.RandomTranslation(0.05, 0.05),   # léger recadrage
+        layers.RandomContrast(0.1),             # variations d'exposition entre clichés
+
+        *conv_block(16),
+        *conv_block(32),
+        *conv_block(64),
+        *conv_block(128),
+
+        layers.GlobalAveragePooling2D(),
+        layers.Dense(50, use_bias=False),
+        layers.BatchNormalization(),
+        layers.Activation("relu"),
+        layers.Dropout(0.3),
+        layers.Dense(1, activation="sigmoid"),
+    ])
+    return model
+
+
 
 def compile_model(model):
     """Compile pour classification binaire. Au-delà de l'accuracy (trompeuse
@@ -138,13 +181,58 @@ def evaluate_model(model, ds_test):
     return results
 
 
-def save_model(model, name="cnn_fracture"):
-    """Sauvegarde le modèle avec un horodatage, pour ne pas écraser les runs
-    précédents et pouvoir comparer les versions."""
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = MODEL_DIR / f"{name}_{timestamp}.keras"
-    model.save(path)
-    print(f"Modèle sauvegardé : {path}")
-    return path
 
+
+
+def save_model(model, name="cnn_fracture"):
+    """Sauvegarde le modèle horodaté dans le bucket GCS (dossier models/),
+    pas en local. Passe par un fichier temporaire car model.save() ne peut pas
+    écrire directement dans GCS. Retourne l'URI gs://."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = f"{name}_{timestamp}.keras"
+    blob_name = f"{MODEL_BUCKET_PREFIX}/{filename}"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = f"{tmpdir}/{filename}"
+        model.save(local_path)                       # écriture locale temporaire
+
+        storage_client = storage.Client()
+        bucket = storage_client.bucket(BUCKET_NAME)
+        bucket.blob(blob_name).upload_from_filename(local_path)
+
+    gs_uri = f"gs://{BUCKET_NAME}/{blob_name}"
+    print(f"  Modèle sauvegardé dans le bucket : {gs_uri}")
+    return gs_uri
+
+
+def _latest_model_blob(bucket):
+    """Retourne le blob du modèle le plus récent dans models/ (par nom, qui
+    contient l'horodatage -> tri alphabétique = tri chronologique)."""
+    blobs = [b for b in bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX}/")
+             if b.name.endswith(".keras")]
+    if not blobs:
+        raise FileNotFoundError(f"Aucun modèle .keras dans gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX}/")
+    return max(blobs, key=lambda b: b.name)   # nom horodaté -> le plus grand = le plus récent
+
+
+def load_model_from_bucket(filename=None):
+    """Charge un modèle depuis le bucket. Si filename est None, prend le plus
+    récent. Télécharge dans un fichier temporaire puis keras.load_model.
+    Retourne le modèle Keras prêt à évaluer."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    if filename:
+        blob = bucket.blob(f"{MODEL_BUCKET_PREFIX}/{filename}")
+        if not blob.exists():
+            raise FileNotFoundError(f"Modèle introuvable : {filename}")
+    else:
+        blob = _latest_model_blob(bucket)
+
+    print(f"  Chargement du modèle : gs://{BUCKET_NAME}/{blob.name}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = f"{tmpdir}/model.keras"
+        blob.download_to_filename(local_path)
+        model = keras.models.load_model(local_path)
+
+    return model
