@@ -152,6 +152,7 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
         model, history = train_model(model, train_ds, val_ds,
                                     y_train=data_train['fracture_visible'])
         save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
+        plot_training_history(history)
 
     elif RUN_MODE == "eval":
         model = load_model_from_bucket(MODEL_TO_LOAD)   # None -> le plus récent
@@ -160,8 +161,6 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
     else:
         sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' ou 'eval')")
 
-    # looking at how the model is behaving
-    plot_training_history(history)
 
     step(5, "Évaluation sur le test")
     results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
@@ -173,18 +172,12 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
 #  ZONE DE MARIANA — performance détaillée
 # ============================================================================
 
-# seuil demandé UNE fois, puis propagé à toutes les métriques
-threshold = get_user_threshold(default=0.5)
-preds = get_predictions(model, test_ds)               # probabilités continues
-y_test = get_y_test(test_ds)                           # étiquettes réelles (même ordre)
-binary_preds = get_binary_predictions(preds, threshold)
 def visualisation_metriques(model, test_ds):
 
-
     # seuil demandé UNE fois, puis propagé à toutes les métriques
-    threshold = get_user_threshold(default=0.5)
-    preds = get_predictions(model, test_ds)               # probabilités continues
-    y_test = get_y_test(test_ds)                           # étiquettes réelles (même ordre)
+    threshold = THRESHOLD
+    preds = get_predictions(model, test_ds)
+    y_test = get_y_test(test_ds)
     binary_preds = get_binary_predictions(preds, threshold)
 
     # métriques sur prédictions binarisées
