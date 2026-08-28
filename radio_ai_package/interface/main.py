@@ -160,6 +160,8 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
     else:
         sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' ou 'eval')")
 
+    # looking at how the model is behaving
+    plot_training_history(history)
 
     step(5, "Évaluation sur le test")
     results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
@@ -170,10 +172,6 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
 # ============================================================================
 #  ZONE DE MARIANA — performance détaillée
 # ============================================================================
-
-# looking at how the model is behaving
-plot_training_history(history)
-
 
 # seuil demandé UNE fois, puis propagé à toutes les métriques
 threshold = get_user_threshold(default=0.5)
