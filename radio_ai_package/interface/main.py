@@ -5,55 +5,54 @@
 import os
 
 # doit être défini AVANT l'import de tensorflow / google
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"        # masque les logs C++ de TF (oneDNN, CPU, cuInit)
-os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"        # coupe le message oneDNN
-os.environ["GRPC_VERBOSITY"] = "ERROR"           # calme les logs gRPC/absl (I0000...)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"   # pas de GPU -> TF ne cherche pas les drivers CUDA
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)   # masque le FutureWarning
+warnings.filterwarnings("ignore", category=FutureWarning)
 
-# Imports du main
 import time
-import pandas as pd
-import numpy as np
 import sys
 from pathlib import Path
+import pandas as pd
+import numpy as np
+
 from radio_ai_package.params import *
 
-# Imports de Luca (data)
+# --- data (Luca) ---
 from radio_ai_package.ml_logic.data import load_data
 from radio_ai_package.ml_logic.preprocessors.preprocessor_CNN import filtering, preprocessing
 from radio_ai_package.ml_logic.viz import show_train_samples, show_predictions
 
-# Imports de Modibo / Merwan (modèle)
+# --- modèle (Modibo / Merwan) ---
 from radio_ai_package.ml_logic.models.model_CNN import (initialize_model, compile_model,
                                                         train_model, evaluate_model,
-                                                        save_model, warmup_cache)
+                                                        save_model, warmup_cache,
+                                                        load_model_from_bucket)
 
+# --- métriques (Mariana) ---
+from radio_ai_package.ml_logic.performance_metrics import (
+    get_user_threshold, get_predictions, get_x_test, get_y_test, get_binary_predictions,
+    get_confusion_matrix, confusion_matrix_display_predicted,
+    comparing_metrics_predictions, get_classification_report,
+    pr_curve, plot_pr_curve, get_roc_auc_analysis)
 
-
-
-# Imports de Mariana (performance metrics)
-from radio_ai_package.ml_logic.models.model_CNN import get_user_threshold, get_predictions, get_x_test, get_y_test, get_binary_predictions
-from radio_ai_package.ml_logic.models.model_CNN import get_confusion_matrix, confusion_matrix_display_predicted
-from radio_ai_package.ml_logic.models.model_CNN import comparing_metrics_predictions, get_classification_report
-from radio_ai_package.ml_logic.models.model_CNN import pr_curve, plot_pr_curve, get_roc_auc_analysis
 
 # ============================================================================
-#  Helpers d'affichage — factorisent le reporting pour un flow lisible
+#  Helpers d'affichage
 # ============================================================================
 
 def step(n, titre):
-    """Affiche un séparateur d'étape bien visible."""
     print("\n" + "=" * 70)
     print(f"  ÉTAPE {n} — {titre}")
     print("=" * 70)
 
 def describe_dataset(df, nom):
-    """Stats d'un ensemble : taille, équilibre des classes, et ventilation
-    classe × côté (laterality) × projection (frontale/latérale)."""
+    """Stats d'un ensemble : taille, équilibre des classes, ventilation
+    classe × côté × projection."""
     n = len(df)
     print(f"\n  [{nom}] — {n} images")
     if n == 0:
@@ -64,13 +63,11 @@ def describe_dataset(df, nom):
     d['main'] = d['laterality'].map({'L': 'gauche', 'R': 'droite'}).fillna('inconnu')
     d['vue']  = d['projection'].map({1: 'frontale', 2: 'laterale'}).fillna('autre')
 
-    # équilibre global des classes
     for classe in sorted(d['fracture_visible'].fillna(0).unique()):
         libelle = "fracture" if classe == 1 else "sain    "
         c = (d['fracture_visible'].fillna(0) == classe).sum()
         print(f"     {libelle} : {c:5d}  ({c/n:5.1%})")
 
-    # croisement classe × main × projection
     print("     " + "-" * 48)
     print(f"     {'classe':10s}{'main':9s}{'vue':11s}{'n':>6s}{'%':>8s}")
     frac = d['fracture_visible'].fillna(0)
@@ -82,12 +79,11 @@ def describe_dataset(df, nom):
             print(f"     {libelle:10s}{main:9s}{vue:11s}{c:6d}{c/n:8.1%}")
 
 # ============================================================================
-#  ZONE DE LUCA — chargement des données
+#  ZONE DE LUCA — chargement
 # ============================================================================
 
-_t_start = time.time()   # chrono global du pipeline
+_t_start = time.time()
 
-# garde-fou : on doit être à la racine du package
 if Path(BASE_DIR).name != "radio_ai":
     sys.exit("ATTENTION : erreur de localisation radio_ai")
 
@@ -105,11 +101,9 @@ describe_dataset(df, "dataset brut")
 #  ZONE DE MODIBO / MERWAN — preprocessing et modèle
 # ============================================================================
 
-step(2, "Filtrage des cas exploitables") # debut du modele de CNN
-
+step(2, "Filtrage des cas exploitables")
 df_filtered_CNN = filtering(df)
 
-# combien on garde / combien on écarte, et pourquoi c'est visible
 retenus = len(df_filtered_CNN)
 ecartes = len(df) - retenus
 print(f"\n  Retenus : {retenus}   |   Écartés : {ecartes}  ({ecartes / len(df):.1%} du brut)")
@@ -117,17 +111,13 @@ describe_dataset(df_filtered_CNN, "après filtrage")
 
 
 step(3, "Découpage train / val / test")
+# UN SEUL appel à preprocessing (sinon on écrase le cache du warmup)
 (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
 
-# mesure du coût de remplissage du cache (le vrai différenciateur local/remote)
 print(f"\n  Remplissage du cache (mode : {DATA_MODE}) :")
 warmup_cache(train_ds, "train")
 warmup_cache(val_ds, "val")
 
-# preprocessing renvoie les 3 datasets tf.data + les 3 DataFrames
-(train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
-
-# pour pouvoir en afficher les stats. Adapte selon ce que preprocessing retourne.
 describe_dataset(data_train, "TRAIN")
 describe_dataset(data_val,   "VAL")
 describe_dataset(data_test,  "TEST")
@@ -136,7 +126,6 @@ train_ids = set(data_train['patient_id'])
 val_ids   = set(data_val['patient_id'])
 test_ids  = set(data_test['patient_id'])
 
-# pour vérifier le split par patient et qu'il n'y ait pas du leackage.
 print("\n  Vérification split par patient :")
 print(f"    patients train : {len(train_ids)}")
 print(f"    patients val   : {len(val_ids)}")
@@ -145,123 +134,56 @@ print(f"    overlap train∩val  : {len(train_ids & val_ids)}")
 print(f"    overlap train∩test : {len(train_ids & test_ids)}")
 print(f"    overlap val∩test   : {len(val_ids & test_ids)}")
 
-
-# montre des images de train - 1er draft - fonction à améliorer
 show_train_samples(data_train)
 
 
-step(4, "Construction et entraînement du modèle")
+step(4, "Modèle : entraînement ou chargement")
 
-model = initialize_model()
-model = compile_model(model)
-model.summary()
+if RUN_MODE == "train":
+    model = initialize_model()
+    model = compile_model(model)
+    model.summary()
+    model, history = train_model(model, train_ds, val_ds,
+                                 y_train=data_train['fracture_visible'])
+    save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
 
-model, history = train_model(model, train_ds, val_ds,
-                             y_train=data_train['fracture_visible'])
+elif RUN_MODE == "eval":
+    model = load_model_from_bucket(MODEL_TO_LOAD)   # None -> le plus récent
+    print("  Mode évaluation : modèle chargé, pas d'entraînement")
 
+else:
+    sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' ou 'eval')")
 
-
-
-
-
-
-
-
-# ============================================================================
-#  ZONE DE MARIANA — performance du modèle
-# ============================================================================
 
 step(5, "Évaluation sur le test")
+results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
 
-results = evaluate_model(model, test_ds)
-save_model(model)
+# ============================================================================
+#  ZONE DE MARIANA — performance détaillée
+# ============================================================================
 
-# Generating predictions
-preds = get_predictions(test_ds)
+# seuil demandé UNE fois, puis propagé à toutes les métriques
+threshold = get_user_threshold(default=0.5)
+preds = get_predictions(model, test_ds)               # probabilités continues
+y_test = get_y_test(test_ds)                           # étiquettes réelles (même ordre)
+binary_preds = get_binary_predictions(preds, threshold)
 
-# Getting the threshold
-threshold = get_user_threshold(test_ds)
+# métriques sur prédictions binarisées
+get_confusion_matrix(y_test, binary_preds)
+confusion_matrix_display_predicted(y_test, binary_preds)
+comparing_metrics_predictions(y_test, binary_preds)
+get_classification_report(y_test, binary_preds)
 
-# Defyning x_test
-X_test = get_x_test(test_ds)
-
-# Defyning y_test
-y_test = get_y_test(test_ds)
-
-# Generating binary predictions (fracture vs no fracture)
-binary_predictions = get_binary_predictions(preds)
-
-# Generating the confusion matrix
-confusion_matrix = get_confusion_matrix(y_test, preds)
-confusion_matrix
-
-cm_drawing = confusion_matrix_display_predicted(y_test, preds)
-cm_drawing
-
-# Comparing metrix
-accuracy, precision, recall, f1 = comparing_metrics_predictions(y_test, preds)
-accuracy, precision, recall, f1
-
-# Classification report
-classification_report = get_classification_report(y_test, preds)
-classification_report
-
-# Precision Recall Curve
-precision_recall_curve = pr_curve(y_test, preds)
-precision_recall_curve
-
+# courbes sur probabilités continues (jamais binarisées)
+pr_curve(y_test, preds)
 plot_pr_curve(y_test, preds)
+get_roc_auc_analysis(y_test, preds)
 
-# ROC_AUC
-fpr, tpr, thresholds, auc_score, best_threshold_j=get_roc_auc_analysis(y_test, preds)
-fpr, tpr, thresholds, auc_score, best_threshold_j
+# ============================================================================
+#  ZONE DE LUCA — recap & fin
+# ============================================================================
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-print("\n" + "=" * 70)
-print("  PIPELINE TERMINÉ")
-print("=" * 70)
-
-# montre des images de predictions - 1er draft - fonction à améliorer
 show_predictions(model, data_test, test_ds)
-
 
 print("\n" + "=" * 70)
 print("  PIPELINE TERMINÉ")
