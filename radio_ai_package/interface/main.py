@@ -81,82 +81,91 @@ def describe_dataset(df, nom):
 # ============================================================================
 #  ZONE DE LUCA — chargement
 # ============================================================================
+def initialisation():
+    t_start = time.time()
 
-_t_start = time.time()
+    if Path(BASE_DIR).name != "radio_ai":
+        sys.exit("ATTENTION : erreur de localisation radio_ai")
 
-if Path(BASE_DIR).name != "radio_ai":
-    sys.exit("ATTENTION : erreur de localisation radio_ai")
+    step(1, "Chargement des données")
+    t0 = time.time()
+    df = load_data()
+    print(f"  ⏱  chargement df : {time.time() - t0:.1f}s")
 
-step(1, "Chargement des données")
-t0 = time.time()
-df = load_data()
-print(f"  ⏱  chargement df : {time.time() - t0:.1f}s")
+    print(f"\n  Dataset brut chargé : {len(df)} lignes, {df.shape[1]} colonnes")
+    print(f"  Mode : {DATA_MODE}  |  colonne chemins : {PATH_COL}")
+    print(f"  Exemple de chemin   : ...{df[PATH_COL].sample(1).str[-40:].values[0]}")
+    describe_dataset(df, "dataset brut")
 
-print(f"\n  Dataset brut chargé : {len(df)} lignes, {df.shape[1]} colonnes")
-print(f"  Mode : {DATA_MODE}  |  colonne chemins : {PATH_COL}")
-print(f"  Exemple de chemin   : ...{df[PATH_COL].sample(1).str[-40:].values[0]}")
-describe_dataset(df, "dataset brut")
+    return df, t_start
 
 # ============================================================================
 #  ZONE DE MODIBO / MERWAN — preprocessing et modèle
 # ============================================================================
 
-step(2, "Filtrage des cas exploitables")
-df_filtered_CNN = filtering(df)
+def preproc(df):
+    step(2, "Filtrage des cas exploitables")
+    df_filtered_CNN = filtering(df)
 
-retenus = len(df_filtered_CNN)
-ecartes = len(df) - retenus
-print(f"\n  Retenus : {retenus}   |   Écartés : {ecartes}  ({ecartes / len(df):.1%} du brut)")
-describe_dataset(df_filtered_CNN, "après filtrage")
-
-
-step(3, "Découpage train / val / test")
-# UN SEUL appel à preprocessing (sinon on écrase le cache du warmup)
-(train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
-
-print(f"\n  Remplissage du cache (mode : {DATA_MODE}) :")
-warmup_cache(train_ds, "train")
-warmup_cache(val_ds, "val")
-
-describe_dataset(data_train, "TRAIN")
-describe_dataset(data_val,   "VAL")
-describe_dataset(data_test,  "TEST")
-
-train_ids = set(data_train['patient_id'])
-val_ids   = set(data_val['patient_id'])
-test_ids  = set(data_test['patient_id'])
-
-print("\n  Vérification split par patient :")
-print(f"    patients train : {len(train_ids)}")
-print(f"    patients val   : {len(val_ids)}")
-print(f"    patients test  : {len(test_ids)}")
-print(f"    overlap train∩val  : {len(train_ids & val_ids)}")
-print(f"    overlap train∩test : {len(train_ids & test_ids)}")
-print(f"    overlap val∩test   : {len(val_ids & test_ids)}")
-
-show_train_samples(data_train)
+    retenus = len(df_filtered_CNN)
+    ecartes = len(df) - retenus
+    print(f"\n  Retenus : {retenus}   |   Écartés : {ecartes}  ({ecartes / len(df):.1%} du brut)")
+    describe_dataset(df_filtered_CNN, "après filtrage")
 
 
-step(4, "Modèle : entraînement ou chargement")
+    step(3, "Découpage train / val / test")
+    # UN SEUL appel à preprocessing (sinon on écrase le cache du warmup)
+    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preprocessing(df_filtered_CNN)
 
-if RUN_MODE == "train":
-    model = initialize_model()
-    model = compile_model(model)
-    model.summary()
-    model, history = train_model(model, train_ds, val_ds,
-                                 y_train=data_train['fracture_visible'])
-    save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
+    print(f"\n  Remplissage du cache (mode : {DATA_MODE}) :")
+    warmup_cache(train_ds, "train")
+    warmup_cache(val_ds, "val")
 
-elif RUN_MODE == "eval":
-    model = load_model_from_bucket(MODEL_TO_LOAD)   # None -> le plus récent
-    print("  Mode évaluation : modèle chargé, pas d'entraînement")
+    describe_dataset(data_train, "TRAIN")
+    describe_dataset(data_val,   "VAL")
+    describe_dataset(data_test,  "TEST")
 
-else:
-    sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' ou 'eval')")
+    train_ids = set(data_train['patient_id'])
+    val_ids   = set(data_val['patient_id'])
+    test_ids  = set(data_test['patient_id'])
+
+    print("\n  Vérification split par patient :")
+    print(f"    patients train : {len(train_ids)}")
+    print(f"    patients val   : {len(val_ids)}")
+    print(f"    patients test  : {len(test_ids)}")
+    print(f"    overlap train∩val  : {len(train_ids & val_ids)}")
+    print(f"    overlap train∩test : {len(train_ids & test_ids)}")
+    print(f"    overlap val∩test   : {len(val_ids & test_ids)}")
+
+    show_train_samples(data_train)
+
+    return (train_ds, val_ds, test_ds), (data_train, data_val, data_test)
+
+def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
+
+    step(4, "Modèle : entraînement ou chargement")
+
+    if RUN_MODE == "train":
+        model = initialize_model()
+        model = compile_model(model)
+        model.summary()
+        model, history = train_model(model, train_ds, val_ds,
+                                    y_train=data_train['fracture_visible'])
+        save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
+
+    elif RUN_MODE == "eval":
+        model = load_model_from_bucket(MODEL_TO_LOAD)   # None -> le plus récent
+        print("  Mode évaluation : modèle chargé, pas d'entraînement")
+
+    else:
+        sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' ou 'eval')")
 
 
-step(5, "Évaluation sur le test")
-results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
+    step(5, "Évaluation sur le test")
+    results = evaluate_model(model, test_ds)   # UNE SEULE évaluation
+    show_predictions(model, data_test, test_ds)
+
+    return model, history
 
 # ============================================================================
 #  ZONE DE MARIANA — performance détaillée
@@ -171,26 +180,42 @@ threshold = get_user_threshold(default=0.5)
 preds = get_predictions(model, test_ds)               # probabilités continues
 y_test = get_y_test(test_ds)                           # étiquettes réelles (même ordre)
 binary_preds = get_binary_predictions(preds, threshold)
+def visualisation_metriques(model, test_ds):
 
-# métriques sur prédictions binarisées
-get_confusion_matrix(y_test, binary_preds)
-confusion_matrix_display_predicted(y_test, binary_preds)
-comparing_metrics_predictions(y_test, binary_preds)
-get_classification_report(y_test, binary_preds)
 
-# courbes sur probabilités continues (jamais binarisées)
-pr_curve(y_test, preds)
-plot_pr_curve(y_test, preds)
-get_roc_auc_analysis(y_test, preds)
+    # seuil demandé UNE fois, puis propagé à toutes les métriques
+    threshold = get_user_threshold(default=0.5)
+    preds = get_predictions(model, test_ds)               # probabilités continues
+    y_test = get_y_test(test_ds)                           # étiquettes réelles (même ordre)
+    binary_preds = get_binary_predictions(preds, threshold)
+
+    # métriques sur prédictions binarisées
+    get_confusion_matrix(y_test, binary_preds)
+    confusion_matrix_display_predicted(y_test, binary_preds)
+    comparing_metrics_predictions(y_test, binary_preds)
+    get_classification_report(y_test, binary_preds)
+
+    # courbes sur probabilités continues (jamais binarisées)
+    pr_curve(y_test, preds)
+    plot_pr_curve(y_test, preds)
+    get_roc_auc_analysis(y_test, preds)
 
 # ============================================================================
 #  ZONE DE LUCA — recap & fin
 # ============================================================================
 
-show_predictions(model, data_test, test_ds)
+def conclusion(t_start):
 
-print("\n" + "=" * 70)
-print("  PIPELINE TERMINÉ")
-total = time.time() - _t_start
-print(f"  Temps total du run : {total:.1f}s  ({total/60:.1f} min)  |  mode : {DATA_MODE}")
-print("=" * 70)
+    print("\n" + "=" * 70)
+    print("  PIPELINE TERMINÉ")
+    total = time.time() - t_start
+    print(f"  Temps total du run : {total:.1f}s  ({total/60:.1f} min)  |  mode : {DATA_MODE}")
+    print("=" * 70)
+
+
+if __name__ == '__main__':
+    df, t_start = initialisation()
+    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preproc(df)
+    model, history = run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test)
+    visualisation_metriques(model, test_ds)
+    conclusion(t_start)

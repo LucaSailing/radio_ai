@@ -4,3 +4,4 @@ matplotlib
 opencv-python
 google-cloud-storage
 scikit-learn
+tensorflow
