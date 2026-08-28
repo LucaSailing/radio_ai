@@ -3,6 +3,8 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
 
+from radio_ai_package.ml_logic.performance_metrics import get_x_test, get_y_test, get_binary_predictions
+
 ####################### Getting the image input ################################
 
 def get_image_sample(X_test, y_test=None, index=0):
@@ -33,6 +35,14 @@ def generate_gradcam_heatmap(model, img_array, last_conv_layer_name):
     """
     Computes standard Grad-CAM heatmap for a binary classification model (Sigmoid).
     """
+    # 0. Automatically locate the last Conv2D layer if not provided
+    if last_conv_layer_name is None:
+        last_conv_layer_name = [
+            layer.name
+            for layer in model.layers
+            if isinstance(layer, tf.keras.layers.Conv2D)
+        ][-1]
+
     # 1. Create a sub-model mapping input -> [target conv output, final model output]
     # This sub-model lets us look at two things at once:
     # What the detective's eyes saw in the middle layer.
