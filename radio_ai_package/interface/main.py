@@ -151,7 +151,7 @@ def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
         model.summary()
         model, history = train_model(model, train_ds, val_ds,
                                     y_train=data_train['fracture_visible'])
-        save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
+        #save_model(model)   # sauvegarde UNIQUE, seulement après entraînement
         plot_training_history(history)
 
     elif RUN_MODE == "eval":
