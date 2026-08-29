@@ -3,7 +3,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
 
-from radio_ai_package.ml_logic.performance_metrics import get_x_test, get_y_test, get_binary_predictions
+from radio_ai_package.ml_logic.performance_metrics import get_x_test, get_y_test, get_binary_predictions, get_confusion_matrix_metrics, get_confusion_matrix_indices
 
 ####################### Getting the image input ################################
 
@@ -168,3 +168,208 @@ def plot_gradcam_comparison(
 
     plt.tight_layout()
     return fig, axes
+
+############################ Grad_cam images of TP, TN, FP and FN #########################################
+def plot_gradcam_confusion_matrix(
+    model,
+    X_test,  # Déjà extrait par get_x_test()
+    y_test,  # Déjà extrait par get_y_test()
+    preds,  # Déjà prédit par get_predictions()
+    binary_preds,  # Déjà binarisé par get_binary_predictions()
+    last_conv_layer_name,
+    alpha=0.4,
+    viz_dir=Path("visualizations"),
+    filename="gradcam_confusion_matrix.png",
+):
+    """Generates a 4x4 grid of Grad-CAM visualizations categorized by Confusion Matrix outcomes:
+    Row 1: True Positives (TP) Row 2: True Negatives (TN) Row 3: False Positives
+    (FP) Row 4: False Negatives (FN)"""
+
+    viz_dir.mkdir(parents=True, exist_ok=True)
+
+    # 0. Automatically locate the last Conv2D layer if not provided
+    if last_conv_layer_name is None:
+        last_conv_layer_name = [
+            layer.name
+            for layer in model.layers
+            if isinstance(layer, tf.keras.layers.Conv2D)
+        ][-1]
+
+    # 1. Declaring the variables needed
+    y_true = y_test
+    y_probs = preds
+    y_preds = binary_preds
+
+    # 2. Extract array indices for each confusion matrix quadrant
+    tp_indices, tn_indices, fp_indices, fn_indices = get_confusion_matrix_indices(
+    y_test, binary_preds
+)
+
+    ## Create a tuple of the different categories containing the pertinent
+    ## indexes and a color code:
+    categories = [
+        ("True Positives (TP)", tp_indices, "green"),
+        ("True Negatives (TN)", tn_indices, "blue"),
+        ("False Positives (FP)", fp_indices, "orange"),
+        ("False Negatives (FN)", fn_indices, "red"),
+    ]
+
+    # 3. Create 4x4 figure layout
+    fig, axes = plt.subplots(4, 4, figsize=(20, 20))
+    fig.suptitle(
+        "GRAZPEDWRI-DX Grad-CAM Diagnostic Grid",
+        fontsize=18,
+        fontweight="bold",
+        y=0.98,
+    )
+
+    # 4. Iterate over rows (categories) and columns (4 samples per category)
+    for row_idx, (cat_name, indices, color) in enumerate(categories):
+        # Sample up to 4 indices (randomized or top sequential)
+        # row_idx  -> Determines the subplot row (0 to 3)
+        # cat_name -> Used for row headers ("True Positives", etc.)
+        # indices  -> The pool of images from which 4 random samples are picked
+        # color    -> Applied to subplot borders and title colors
+        selected_indices = (
+            np.random.choice(indices, size=4, replace=False)
+            if len(indices) >= 4
+            else indices
+        )
+
+        for col_idx in range(4):
+            ax = axes[row_idx, col_idx]
+
+            # Handle case where a category has fewer than 4 total samples
+            if col_idx >= len(selected_indices):
+                ax.axis("off")
+                ax.text(
+                    0.5,
+                    0.5,
+                    "N/A (Insufficient Samples)",
+                    ha="center",
+                    va="center",
+                )
+                continue
+
+            # Extracting the data for each photo
+            idx = selected_indices[col_idx]
+            raw_img = X_test[idx]
+            true_lbl = y_true[idx]
+            pred_prob = y_probs[idx]
+            pred_lbl = y_preds[idx]
+
+            # Format input tensor (1, H, W, C) so it can be fed into both
+            # Keras model and OpenCV functions without shape mismatch errors
+            # **** input_tensor: A 4D batch tensor of shape (1, H, W, C)
+            # required by Keras models for inference.
+            # **** img_gray: A 2D grayscale image array of shape (H, W)
+            # required by OpenCV for Grad-CAM visualization blending.
+            if len(raw_img.shape) == 2:
+                # Condition: Triggered if the image is a plain 2D matrix
+                # (shape (256, 256)):
+                # **** input_tensor: np.expand_dims(..., axis=(0, -1))
+                # adds a batch dimension at the front (axis 0)
+                # and a channel dimension at the back (axis -1),
+                # turning (256, 256) into (1, 256, 256, 1).
+                # **** img_gray: Kept as raw_img directly since it is already 2D.
+                input_tensor = np.expand_dims(raw_img, axis=(0, -1))
+                img_gray = raw_img
+            elif raw_img.shape[-1] == 1:
+                # Condition: Triggered if the image has an explicit single-channel dimension
+                # (shape (256, 256, 1)):
+                # *** input_tensor: Adds only the batch dimension at axis 0,
+                # resulting in (1, 256, 256, 1).
+                # *** img_gray: .squeeze(-1) removes the trailing single-channel dimension,
+                # reducing (256, 256, 1) to a 2D array (256, 256)
+                input_tensor = np.expand_dims(raw_img, axis=0)
+                img_gray = raw_img.squeeze(-1)
+            else:
+                # Condition: Triggered if the image has 3 color channels
+                # (e.g., shape (256, 256, 3)):
+                # *** input_tensor: Adds the batch dimension at axis 0,
+                # resulting in (1, 256, 256, 3).
+                # ***img_gray: Converts the 3-channel RGB image into a single
+                # 2D grayscale matrix using cv2.cvtColor, ensuring the base
+                # X-ray image renders as monochrome under the colored heatmaps.
+                input_tensor = np.expand_dims(raw_img, axis=0)
+                img_gray = cv2.cvtColor(raw_img, cv2.COLOR_RGB2GRAY)
+
+            # Generate Heatmap
+            heatmap = generate_gradcam_heatmap(
+                model, input_tensor, last_conv_layer_name
+            )
+
+            # Create Superimposed RGB Image
+            ## Grad-CAM heatmaps are extracted from the last convolutional layer,
+            ## which is much smaller than the original input image
+            ## OpenCV's resize stretches the heatmap back up to match the exact
+            # width and height of your input image (img_gray.shape[1] is width,
+            # img_gray.shape[0] is height).
+            heatmap_resized = cv2.resize(
+                heatmap, (img_gray.shape[1], img_gray.shape[0])
+            )
+
+            ## Converting continuous floating-point values (0.0 to 1.0)
+            ## into an 8-bit unsigned integer range (0 to 255), which is required by
+            ## OpenCV's color mapping functions.
+            heatmap_uint8 = np.uint8(255 * heatmap_resized)
+
+            ## Applying the JET colormap, transforming grayscale intensity \
+            ## values into a thermal color spectrum
+            heatmap_color = cv2.applyColorMap(
+                heatmap_uint8, cv2.COLORMAP_JET
+            )
+
+            ## OpenCV natively produces images in BGR (Blue-Green-Red) order.
+            ## Matplotlib requires RGB (Red-Green-Blue), so this swaps the channels
+            ## so colors display correctly on the figure.
+            heatmap_rgb = cv2.cvtColor(heatmap_color, cv2.COLOR_BGR2RGB)
+
+            ## Normalizes the 2D grayscale X-ray into an 8-bit image (0–255) and
+            ## converts it to a 3-channel RGB representation so it can be
+            ## mathematically blended with the 3-channel heatmap.
+            img_rgb = cv2.cvtColor(
+                np.uint8(img_gray * 255), cv2.COLOR_GRAY2RGB
+            )
+            ## Blends the two RGB images using a weighted linear combination
+            ## With alpha=0.4, the final image is 60% original X-ray structural detail
+            # and 40% transparent color heatmap overlay.
+            overlay = cv2.addWeighted(
+                img_rgb, 1 - alpha, heatmap_rgb, alpha, 0
+            )
+
+            # Render image on subplot
+            ax.imshow(overlay)
+            ax.axis("off")
+
+            # Title & Metadata Annotation
+            title_text = f"Prob: {pred_prob:.3f} | True: {true_lbl}"
+            ax.set_title(title_text, fontsize=10, fontweight="bold")
+
+            # Draw colored bounding box border per category
+            for spine in ax.spines.values():
+                spine.set_edgecolor(color)
+                spine.set_linewidth(3)
+                spine.set_visible(True)
+
+        # Row Header Labels on the far left
+        axes[row_idx, 0].text(
+            -0.12,
+            0.5,
+            cat_name,
+            transform=axes[row_idx, 0].transAxes,
+            rotation=90,
+            fontsize=13,
+            fontweight="bold",
+            va="center",
+            ha="center",
+            color=color,
+        )
+
+    plt.tight_layout(rect=[0.03, 0.03, 1, 0.96])
+
+    # Save first, show second
+    out_path = viz_dir / filename
+    fig.savefig(out_path, bbox_inches="tight", dpi=150)
+    plt.show()
+    plt.close(fig)
