@@ -46,3 +46,16 @@ MODEL_TO_LOAD = None if _model in ("None", "") else _model
 
 # --- mode evaluation  -------------------------------------------------------
 THRESHOLD = float(os.environ.get("THRESHOLD"))
+
+
+
+
+
+
+
+
+#YOLO PARAMETERS
+EPOCH_YOLO = int(os.environ.get("EPOCH_YOLO"))
+IMAGE_SIZE_YOLO = int(os.environ.get("IMAGE_SIZE_YOLO"))
+PATIENCE_YOLO = int(os.environ.get("PATIENCE_YOLO"))
+YOLO = "yolov8n.pt"
