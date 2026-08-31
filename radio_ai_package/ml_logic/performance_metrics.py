@@ -11,11 +11,15 @@ import numpy as np
 import pandas as pd
 
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
-                             ConfusionMatrixDisplay,
+                             ConfusionMatrixDisplay, confusion_matrix,
                              precision_recall_curve, PrecisionRecallDisplay,
                              roc_curve, roc_auc_score, classification_report)
 
 from radio_ai_package.params import RAW_DATA_DIR
+
+from pathlib import Path
+import cv2
+import tensorflow as tf
 
 VIZ_DIR = RAW_DATA_DIR / "viz"
 
@@ -51,7 +55,8 @@ def get_predictions(model, test_ds):
     """Probabilités continues prédites sur le test. On passe le modèle déjà en
     mémoire (entraîné ou chargé du bucket) au lieu d'en recharger un — cohérent
     avec le pipeline, pas de double chargement."""
-    return model.predict(test_ds)
+    preds = model.predict(test_ds)
+    return preds
 
 
 def get_y_test(test_ds):
@@ -74,7 +79,8 @@ def get_binary_predictions(preds, threshold=0.5):
     """Binarise les probabilités selon un seuil DONNÉ. Le seuil est décidé une
     seule fois en amont et propagé, pour que toutes les métriques soient
     cohérentes entre elles (pas de seuil redemandé à chaque fonction)."""
-    return (preds.flatten() > threshold).astype(int)
+    binary_preds = (preds.flatten() > threshold).astype(int)
+    return binary_preds
 
 
 # ---------- matrice de confusion ----------
@@ -85,6 +91,28 @@ def get_confusion_matrix(y_test, binary_preds):
                                "predicted": np.asarray(binary_preds).flatten()})
     return pd.crosstab(results_df['actual'], results_df['predicted'])
 
+def get_confusion_matrix_metrics(y_test, binary_preds):
+    """Extracts raw counts (TN, FP, FN, TP) from binary test predictions."""
+    ## Because sklearn.metrics.confusion_matrix returns a 2D array
+    ## ([[TN, FP], [FN, TP]]), Python sees 2 rows instead of 4 individual numbers
+    ##  Flatten the 2D array using .ravel() (or .flatten()) before unpacking:
+    y_true = np.asarray(y_test).flatten()
+    y_pred = np.asarray(binary_preds).flatten()
+
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return tn, fp, fn, tp
+
+def get_confusion_matrix_indices(y_test, binary_preds):
+    """Returns positional indices for each quadrant of the confusion matrix."""
+    y_true = np.asarray(y_test).flatten()
+    y_pred = np.asarray(binary_preds).flatten()
+
+    tp_indices = np.where((y_pred == 1) & (y_true == 1))[0]
+    tn_indices = np.where((y_pred == 0) & (y_true == 0))[0]
+    fp_indices = np.where((y_pred == 1) & (y_true == 0))[0]
+    fn_indices = np.where((y_pred == 0) & (y_true == 1))[0]
+
+    return tp_indices, tn_indices, fp_indices, fn_indices
 
 def confusion_matrix_display_predicted(y_test, binary_preds, filename="confusion_matrix.png"):
     """Enregistre la matrice de confusion en PNG (pas de show en WSL)."""
@@ -195,11 +223,13 @@ def get_roc_auc_analysis(y_test, preds, filename="roc_curve.png"):
 
 
 ################################### History plot ###############################
-def plot_training_history(history):
+def plot_training_history(history, filename="training_history.png"):
     """
     Plots Training vs Validation Loss, Recall, and Accuracy in a 1x3 grid.
     Marks the best epoch based on minimum validation loss.
     """
+    VIZ_DIR.mkdir(parents=True, exist_ok=True)
+
     epochs = range(1, len(history.history['loss']) + 1)
     best_epoch = np.argmin(history.history['val_loss']) + 1
     best_val_loss = history.history['val_loss'][best_epoch - 1]
@@ -251,4 +281,7 @@ def plot_training_history(history):
 
     plt.suptitle('CNN Training & Validation Metrics', fontsize=14, fontweight='bold', y=1.02)
     plt.tight_layout()
+
+    out = VIZ_DIR / filename
+    fig.savefig(out, bbox_inches="tight", dpi=120)
     plt.show()
