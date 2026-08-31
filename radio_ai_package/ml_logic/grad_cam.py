@@ -2,6 +2,7 @@ import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
+from pathlib import Path
 
 from radio_ai_package.ml_logic.performance_metrics import get_x_test, get_y_test, get_binary_predictions, get_confusion_matrix_metrics, get_confusion_matrix_indices
 
@@ -83,36 +84,53 @@ def generate_gradcam_heatmap(model, img_array, last_conv_layer_name):
     # 6. Apply ReLU and normalize: get rid of all negative contributors
     # We shrink or stretch all numbers so they are easily measured between
     # 0 (no interest) and 1 (super hot spot!).
-    heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-10)
+    heatmap = tf.maximum(heatmap, 0)
+    max_val = tf.reduce_max(heatmap)
+
+    # Return as a clean 2D NumPy float32 array
+    if max_val > 0:
+        heatmap = heatmap / max_val
+
     return heatmap.numpy()
 
 
 ####################### Generating the GC overlay ##############################
 def overlay_gradcam(img_2d, heatmap, alpha=0.4):
-    """
-    Resizes heatmap to match image dimensions and overlays color map onto grayscale image.
-    """
-    # Ensure image is 2D uint8 scaled 0-255 (as opposed 0-1)
-    if img_2d.max() <= 1.0:
-        img_2d = (img_2d * 255).astype(np.uint8)
-    else:
-        img_2d = img_2d.astype(np.uint8)
+    """Resizes heatmap to match image dimensions and overlays color map onto grayscale image."""
 
-    # Convert single-channel image to RGB for color overlay
-    if len(img_2d.shape) == 2 or img_2d.shape[-1] == 1:
-        img_rgb = cv2.cvtColor(img_2d.squeeze(), cv2.COLOR_GRAY2RGB)
-    else:
-        img_rgb = img_2d.copy()
+    # 1. Safely normalize base image to [0, 1] and convert to 8-bit RGB
+    img_gray = img_2d.squeeze()
+    img_norm = (img_gray - img_gray.min()) / (
+        img_gray.max() - img_gray.min() + 1e-8
+    )
+    img_uint8 = np.uint8(255 * img_norm)
 
-    # Resize heatmap to match original image dimensions
-    heatmap_resized = cv2.resize(heatmap, (img_rgb.shape[1], img_rgb.shape[0]))
+    if len(img_uint8.shape) == 2:
+        img_rgb = cv2.cvtColor(img_uint8, cv2.COLOR_GRAY2RGB)
+    else:
+        img_rgb = img_uint8.copy()
+
+    # 2. Safely normalize heatmap to [0, 1] before scaling
+    heatmap_norm = (heatmap - heatmap.min()) / (
+        heatmap.max() - heatmap.min() + 1e-8
+    )
+
+    # 3. Resize heatmap to match base image dimensions
+    heatmap_resized = cv2.resize(
+        heatmap_norm, (img_rgb.shape[1], img_rgb.shape[0])
+    )
     heatmap_uint8 = np.uint8(255 * heatmap_resized)
 
-    # Apply Jet color map (Red = high activation, Blue = low activation)
-    color_map = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    # 4. Apply Jet color map & convert OpenCV's BGR output to RGB:
+    # (Red = high activation, Blue = low activation)
+    color_map_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    color_map_rgb = cv2.cvtColor(color_map_bgr, cv2.COLOR_BGR2RGB)
 
-    # Superimpose color map onto original image
-    superimposed_img = cv2.addWeighted(img_rgb, 1 - alpha, color_map, alpha, 0)
+    # 5. Superimpose color map onto original image
+    superimposed_img = cv2.addWeighted(
+        img_rgb, 1 - alpha, color_map_rgb, alpha, 0
+    )
+
     return superimposed_img, heatmap_resized
 
 
@@ -172,19 +190,19 @@ def plot_gradcam_comparison(
 ############################ Grad_cam images of TP, TN, FP and FN #########################################
 def plot_gradcam_confusion_matrix(
     model,
-    X_test,  # Déjà extrait par get_x_test()
-    y_test,  # Déjà extrait par get_y_test()
-    preds,  # Déjà prédit par get_predictions()
-    binary_preds,  # Déjà binarisé par get_binary_predictions()
+    X_test,
+    y_test,
+    preds,
+    binary_preds,
     last_conv_layer_name,
     alpha=0.4,
     viz_dir=Path("visualizations"),
     filename="gradcam_confusion_matrix.png",
 ):
-    """Generates a 4x4 grid of Grad-CAM visualizations categorized by Confusion Matrix outcomes:
-    Row 1: True Positives (TP) Row 2: True Negatives (TN) Row 3: False Positives
-    (FP) Row 4: False Negatives (FN)"""
+    """Generates a 4x4 diagnostic grid of Grad-CAM heatmaps for TP, TN, FP, and FN categories.
 
+    Accepts pre-computed NumPy arrays for fast execution without redundant model inference.
+    """
     viz_dir.mkdir(parents=True, exist_ok=True)
 
     # 0. Automatically locate the last Conv2D layer if not provided
@@ -195,15 +213,14 @@ def plot_gradcam_confusion_matrix(
             if isinstance(layer, tf.keras.layers.Conv2D)
         ][-1]
 
-    # 1. Declaring the variables needed
-    y_true = y_test
-    y_probs = preds
-    y_preds = binary_preds
+    # 1. Ensure inputs are flat 1D NumPy arrays
+    y_true = np.asarray(y_test).ravel().astype(int)
+    y_probs = np.asarray(preds).ravel().astype(float)
+    y_preds = np.asarray(binary_preds).ravel().astype(int)
 
-    # 2. Extract array indices for each confusion matrix quadrant
+     # 2. Extract array indices for each confusion matrix quadrant
     tp_indices, tn_indices, fp_indices, fn_indices = get_confusion_matrix_indices(
-    y_test, binary_preds
-)
+    y_test, binary_preds)
 
     ## Create a tuple of the different categories containing the pertinent
     ## indexes and a color code:
@@ -214,16 +231,16 @@ def plot_gradcam_confusion_matrix(
         ("False Negatives (FN)", fn_indices, "red"),
     ]
 
-    # 3. Create 4x4 figure layout
+    # 3. Initialize 4x4 subplot grid
     fig, axes = plt.subplots(4, 4, figsize=(20, 20))
     fig.suptitle(
-        "GRAZPEDWRI-DX Grad-CAM Diagnostic Grid",
+        "GRAZPEDWRI-DX — Grad-CAM Confusion Matrix Grid",
         fontsize=18,
         fontweight="bold",
         y=0.98,
     )
 
-    # 4. Iterate over rows (categories) and columns (4 samples per category)
+# 4. Iterate over rows (categories) and columns (4 samples per category)
     for row_idx, (cat_name, indices, color) in enumerate(categories):
         # Sample up to 4 indices (randomized or top sequential)
         # row_idx  -> Determines the subplot row (0 to 3)
@@ -254,8 +271,10 @@ def plot_gradcam_confusion_matrix(
             # Extracting the data for each photo
             idx = selected_indices[col_idx]
             raw_img = X_test[idx]
-            true_lbl = y_true[idx]
-            pred_prob = y_probs[idx]
+
+            # Extract scalars safely to avoid string formatting TypeErrors
+            true_lbl = int(y_true[idx].item() if hasattr(y_true[idx], "item") else y_true[idx])
+            pred_prob = float(y_probs[idx].item() if hasattr(y_probs[idx], "item") else y_probs[idx])
             pred_lbl = y_preds[idx]
 
             # Format input tensor (1, H, W, C) so it can be fed into both
@@ -296,22 +315,20 @@ def plot_gradcam_confusion_matrix(
 
             # Generate Heatmap
             heatmap = generate_gradcam_heatmap(
-                model, input_tensor, last_conv_layer_name
-            )
+                model, input_tensor, last_conv_layer_name)
 
-            # Create Superimposed RGB Image
-            ## Grad-CAM heatmaps are extracted from the last convolutional layer,
-            ## which is much smaller than the original input image
-            ## OpenCV's resize stretches the heatmap back up to match the exact
-            # width and height of your input image (img_gray.shape[1] is width,
-            # img_gray.shape[0] is height).
+             # Create Superimposed RGB Image
+             ## Grad-CAM heatmaps are extracted from the last convolutional layer,
+             ## which is much smaller than the original input image
+             ## OpenCV's resize stretches the heatmap back up to match the exact
+             # width and height of your input image (img_gray.shape[1] is width,
+             # img_gray.shape[0] is height).
             heatmap_resized = cv2.resize(
-                heatmap, (img_gray.shape[1], img_gray.shape[0])
-            )
+                heatmap, (img_gray.shape[1], img_gray.shape[0]))
 
-            ## Converting continuous floating-point values (0.0 to 1.0)
-            ## into an 8-bit unsigned integer range (0 to 255), which is required by
-            ## OpenCV's color mapping functions.
+             ## Converting continuous floating-point values (0.0 to 1.0)
+             ## into an 8-bit unsigned integer range (0 to 255), which is required by
+             ## OpenCV's color mapping functions.
             heatmap_uint8 = np.uint8(255 * heatmap_resized)
 
             ## Applying the JET colormap, transforming grayscale intensity \
@@ -338,20 +355,24 @@ def plot_gradcam_confusion_matrix(
                 img_rgb, 1 - alpha, heatmap_rgb, alpha, 0
             )
 
+
             # Render image on subplot
             ax.imshow(overlay)
             ax.axis("off")
 
             # Title & Metadata Annotation
             title_text = f"Prob: {pred_prob:.3f} | True: {true_lbl}"
-            ax.set_title(title_text, fontsize=10, fontweight="bold")
+            ax.set_title(
+                f"Idx: {idx} | Prob: {pred_prob:.3f} | True: {true_lbl}",
+                fontsize=10,
+                fontweight="bold",
+            )
 
             # Draw colored bounding box border per category
             for spine in ax.spines.values():
                 spine.set_edgecolor(color)
                 spine.set_linewidth(3)
                 spine.set_visible(True)
-
         # Row Header Labels on the far left
         axes[row_idx, 0].text(
             -0.12,
@@ -368,8 +389,9 @@ def plot_gradcam_confusion_matrix(
 
     plt.tight_layout(rect=[0.03, 0.03, 1, 0.96])
 
-    # Save first, show second
+    # Save output
     out_path = viz_dir / filename
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.show()
     plt.close(fig)
+    print(f"Grad-CAM Confusion Matrix saved to: {out_path}")
