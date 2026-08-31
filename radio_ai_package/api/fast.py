@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 # Import OUR visualization modules
-# from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
+from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
 
 app = FastAPI(title="X-Ray Fracture Detection API with Grad-CAM")
 
