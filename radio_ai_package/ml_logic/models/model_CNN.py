@@ -32,7 +32,7 @@ from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
 
 def initialize_model():
 
-     def conv_block(filters):
+    def conv_block(filters):
         return [
             layers.Conv2D(
                 filters,
@@ -46,10 +46,9 @@ def initialize_model():
         ]
 
     model = Sequential([
-
         layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
 
-        # Data augmentation légère
+        # Data augmentation
         layers.RandomRotation(0.03),
         layers.RandomTranslation(0.03, 0.03),
         layers.RandomContrast(0.10),
@@ -60,13 +59,12 @@ def initialize_model():
         *conv_block(64),
         *conv_block(128),
 
-        # Beaucoup plus efficace que Flatten
+        # Remplace Flatten
         layers.GlobalAveragePooling2D(),
 
         layers.Dense(128, use_bias=False),
         layers.BatchNormalization(),
         layers.Activation("relu"),
-
         layers.Dropout(0.3),
 
         layers.Dense(1, activation="sigmoid")
@@ -74,100 +72,39 @@ def initialize_model():
 
     return model
 
- #def initialize_model():
-    # """CNN pour classification binaire de radios en niveaux de gris.
-     4 blocs conv + GlobalAveragePooling (au lieu de Flatten) + dropout.
-    # Lit IMG_SIZE depuis params.py -> reste synchronisé avec le pipeline."""
-     model = Sequential([
-         #layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),   # <- IMG_SIZE, pas 256 en dur
-
-         # Bloc 1
-         #layers.Conv2D(16, (3, 3), padding="same", activation="relu"),
-         #layers.MaxPooling2D(pool_size=(2, 2)),
-
-         # Bloc 2
-         #layers.Conv2D(32, (3, 3), padding="same", activation="relu"),
-         #layers.MaxPooling2D(pool_size=(2, 2)),
-
-         # Bloc 3
-         #layers.Conv2D(64, (3, 3), padding="same", activation="relu"),
-         #layers.MaxPooling2D(pool_size=(2, 2)),
-
-         # Bloc 4
-         #layers.Conv2D(128, (3, 3), padding="same", activation="relu"),
-         #layers.MaxPooling2D(pool_size=(2, 2)),
-
-         #layers.GlobalAveragePooling2D(),        # remplace Flatten
-
-         #layers.Dense(50, activation="relu"),
-         #layers.Dropout(0.3),
-         #layers.Dense(1, activation="sigmoid"),  # proba de fracture
-     ])
-     #return model
-
-
-#def initialize_model():
-#   """CNN binaire (radios niveaux de gris). Bloc d'augmentation (actif à
-#  l'entraînement seulement) puis Conv -> BatchNorm -> ReLU par bloc."""
-
-#    def conv_block(x_filters):
-#       return [
-#            layers.Conv2D(x_filters, (3, 3), padding="same", use_bias=False),
-#            layers.BatchNormalization(),
-#            layers.Activation("relu"),
-#            layers.MaxPooling2D(pool_size=(2, 2)),
-#        ]
-
-#    model = Sequential([
-#        layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
-
-        # --- augmentation (ne s'applique qu'à l'entraînement) ---
-#        layers.RandomFlip("horizontal"),        # poignet G <-> D : miroir valide, label inchangé
-#        layers.RandomRotation(0.05),            # ±~18°, petites variations de pose
-#        layers.RandomTranslation(0.05, 0.05),   # léger recadrage
-#        layers.RandomContrast(0.1),             # variations d'exposition entre clichés
-
-#        *conv_block(16),
-#        *conv_block(32),
-#        *conv_block(64),
-#        *conv_block(128),
-
-#        layers.GlobalAveragePooling2D(),
-#        layers.Dense(50, use_bias=False),
-#        layers.BatchNormalization(),
-#        layers.Activation("relu"),
-#        layers.Dropout(0.3),
-#        layers.Dense(1, activation="sigmoid"),
-#    ])
-#    return model
-
-
 
 def compile_model(model):
-    """Compile pour classification binaire. Au-delà de l'accuracy (trompeuse
-    sur un jeu déséquilibré), on suit precision, recall et AUC — les métriques
-    qui comptent vraiment pour du dépistage médical."""
+
     model.compile(
-        loss='binary_crossentropy',
+        loss="binary_crossentropy",
         optimizer=optimizers.Adam(learning_rate=1e-4),
         metrics=[
-            'accuracy',
-            tf.keras.metrics.Precision(name='precision'),
-            tf.keras.metrics.Recall(name='recall'),
-            tf.keras.metrics.AUC(name='auc'),
+            "accuracy",
+            tf.keras.metrics.Precision(name="precision"),
+            tf.keras.metrics.Recall(name="recall"),
+            tf.keras.metrics.AUC(name="auc"),
         ]
     )
+
     return model
 
 
-#def compute_class_weights(y):
-    """Poids de classe pour compenser le déséquilibre (fractures minoritaires).
-    Calculé directement sur la série d'étiquettes du train — instantané, pas
-    besoin de re-parcourir le tf.data.Dataset."""
+def compute_class_weights(y):
+
     y = np.asarray(y).astype(int)
+
     classes = np.unique(y)
-    weights = compute_class_weight('balanced', classes=classes, y=y)
-    #return {int(c): float(w) for c, w in zip(classes, weights)}
+
+    weights = compute_class_weight(
+        "balanced",
+        classes=classes,
+        y=y
+    )
+
+    return {
+        int(c): float(w)
+        for c, w in zip(classes, weights)
+    }
 
 
 
