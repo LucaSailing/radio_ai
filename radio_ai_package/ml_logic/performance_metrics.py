@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
-                             ConfusionMatrixDisplay, confusion_matrix
+                             ConfusionMatrixDisplay, confusion_matrix,
                              precision_recall_curve, PrecisionRecallDisplay,
                              roc_curve, roc_auc_score, classification_report)
 
