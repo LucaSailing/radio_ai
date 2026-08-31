@@ -77,7 +77,7 @@ def compile_model(model):
 
     model.compile(
         loss="binary_crossentropy",
-        optimizer=optimizers.Adam(learning_rate=1e-4),
+        optimizer=optimizers.Adam(learning_rate=LEARNING_RATE),
         metrics=[
             "accuracy",
             tf.keras.metrics.Precision(name="precision"),
@@ -134,7 +134,7 @@ def train_model(model, ds_train, ds_val, y_train=None):
             patience=5, restore_best_weights=True, verbose=1),
         callbacks.ReduceLROnPlateau(
             monitor='val_loss', factor=0.5,
-            patience=3, min_lr=1e-6, verbose=1),
+            patience=PATIENCE, min_lr=1e-6, verbose=1),
     ]
 
     class_weight = None
@@ -145,7 +145,7 @@ def train_model(model, ds_train, ds_val, y_train=None):
     history = model.fit(
         ds_train,
         validation_data=ds_val,
-        epochs=1,
+        epochs=EPOCHS,
         #class_weight=class_weight,
         callbacks=cbs,
         verbose=1
