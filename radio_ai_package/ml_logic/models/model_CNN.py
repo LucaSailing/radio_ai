@@ -128,13 +128,18 @@ def train_model(model, ds_train, ds_val, y_train=None):
     """Entraîne avec EarlyStopping (monitore val_auc, restaure les meilleurs
     poids) et réduction du learning rate sur plateau. Si y_train est fourni,
     applique des poids de classe. Retourne (model, history)."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+
     cbs = [
+        callbacks.ModelCheckpoint(
+            filepath=f"checkpoints/fracture_cnn_{timestamp}.keras"
+        ),
         callbacks.EarlyStopping(
             monitor='val_auc', mode='max',
-            patience=5, restore_best_weights=True, verbose=1),
+            patience=PATIENCE, restore_best_weights=True, verbose=1),
         callbacks.ReduceLROnPlateau(
             monitor='val_loss', factor=0.5,
-            patience=PATIENCE, min_lr=1e-6, verbose=1),
+            patience=max(1, PATIENCE // 2), min_lr=1e-6, verbose=1),
     ]
 
     class_weight = None
