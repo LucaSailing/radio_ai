@@ -57,11 +57,18 @@ def preprocess_image_to_tensor(
     return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
 
 
+
+
+
+
 ######################## Generating the heatmap ################################
-def generate_gradcam_heatmap(model, img_array, last_conv_layer_name):
-    """
-    Computes standard Grad-CAM heatmap for a binary classification model (Sigmoid).
-    """
+def generate_gradcam_heatmap(
+    model: tf.keras.Model,
+    input_tensor: tf.Tensor,
+    last_conv_layer_name: str = None,
+    target_mode: str = "fracture_only") -> np.ndarray:
+    """Computes standard Grad-CAM heatmap for a binary classification model (Sigmoid).
+    Accepts a 4D input tensor shape: (1, H, W, C)."""
     # 0. Automatically locate the last Conv2D layer if not provided
     if last_conv_layer_name is None:
         last_conv_layer_name = [
@@ -85,16 +92,24 @@ def generate_gradcam_heatmap(model, img_array, last_conv_layer_name):
     # 2. Record operations for automatic differentiation
     # GradientTape works as a videocamera
     with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_array)
+        conv_outputs, predictions = grad_model(input_tensor)
         # Because we only have fracture or not and so
         # we are using a sigmoid activation,
         # we can Directly target index 0 (the positive class probability: the final guess)
-        class_channel = predictions[:, 0]
+        pred_score = predictions[:, 0]
 
-    # 3. Compute gradients of class 1 probability (fracture) w.r.t. last conv output
+        # Target class selection based on toggle mode
+        if target_mode == "winning_class":
+            loss = tf.where(
+                pred_score >= 0.5, pred_score, 1.0 - pred_score
+            )
+        else:
+            loss = pred_score
+
+    # 3. Compute gradients of target loss w.r.t. last conv output
     # If i changed the picture just a tiny bit, how would this affect your guess?
     # It calculates a gradient for each tiny piece of the image
-    grads = tape.gradient(class_channel, conv_outputs)
+    grads = tape.gradient(loss, conv_outputs)
 
     # 4. Global average pooling: the weights
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
