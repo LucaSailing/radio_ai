@@ -1,25 +1,45 @@
 import base64
+from contextlib import asynccontextmanager
+from typing import Optional
+
 import cv2
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import tensorflow as tf
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from pathlib import Path
 
-# Import OUR visualization modules
-from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
+from radio_ai_package.ml_logic.models.model_CNN import load_cnn_model
+from radio_ai_package.ml_logic.models.model_VGG import load_vgg_model
+from radio_ai_package.ml_logic.models.model_YOLO import load_yolo_model
 
-app = FastAPI(title="X-Ray Fracture Detection API with Grad-CAM")
+# --- GLOBAL APP STATE & CONFIG ---
+MODELS = {}
+TARGET_SIZE = (224, 224)
 
-# $WIPE_BEGIN
-# 💡 Preload the model to accelerate the predictions
-# We want to avoid loading the heavy Deep Learning model from MLflow at each `get("/predict")`
-# The trick is to load the model in memory when the Uvicorn server starts
-# and then store the model in an `app.state.model` global variable, accessible across all routes!
-app.state.model = load_model_from_bucket()
-# $WIPE_END
+# --- LIFESPAN MANAGER ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    print("Initializing server and loading deep learning models into RAM...")
+    try:
+        MODELS["cnn"] = load_cnn_model()
+        MODELS["vgg"] = load_vgg_model()
+        MODELS["yolo"] = load_yolo_model()
+        print("All models (CNN, VGG, YOLO) loaded successfully!")
+    except Exception as e:
+        print(f"Warning: Model preloading failed: {e}")
 
-# Enable CORS for frontend interfaces
+    yield
+
+    print("Shutting down API server... clearing model memory.")
+    MODELS.clear()
+
+
+app = FastAPI(
+    title="GRAZPEDWRI-DX Fracture Diagnostics API",
+    description="Multi-task API for X-ray Classification (CNN/VGG + Grad-CAM) and Segmentation (YOLO)",
+    lifespan=lifespan,
+)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -28,105 +48,231 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- CONFIGURATION ---
-#    MODEL_PATH = "models/fracture_detection_model.keras"
-#    TARGET_SIZE = (224, 224)
 
-# Define the target layer for Grad-CAM.
-# We hardcode it here instead of auto-detecting for stability in API.
-LAST_CONV_LAYER_NAME = "conv2d_2" # Example: Update to match your model summary
+# --- PREPROCESSING & HELPER FUNCTIONS ---
 
-# --- STATE MANAGEMENT: Lifespan ---
-# @app.on_event("startup")
-# def startup_load_model():
-#     """Load model once on startup."""
-#     try:
-#         app.state.model = tf.keras.models.load_model(MODEL_PATH)
-#         print("Model loaded successfully!")
-#     except Exception as e:
-#         print(f"Error loading model: {e}")
-#         app.state.model = None
 
-# # --- Helper: image processing ---
-# def preprocess_for_inference(contents: bytes):
-#     """Converts uploaded bytes to 4D model input tensor."""
-#     # ... previous implementation ...
-#     return input_tensor
+def preprocess_image_to_tensor(
+    img_gray: np.ndarray,
+    target_size: tuple = TARGET_SIZE,
+) -> tf.Tensor:
+    """Converts a grayscale NumPy image array into a normalized 4D float32 input tensor (1, H, W, 1)."""
+    img_resized = cv2.resize(img_gray, target_size)
+    img_normalized = img_resized.astype(np.float32) / 255.0
+    input_tensor = np.expand_dims(np.expand_dims(img_normalized, axis=-1), axis=0)
+    return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
 
-# def preprocess_for_gradcam(contents: bytes):
-#     """Converts uploaded bytes to raw image (H, W, 1) and raw overlay (H, W, 3)."""
-#     # 1. Standard Gray Input (like before)
-#     np_arr = np.frombuffer(contents, np.uint8)
-#     img_gray = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
-#     if img_gray is None: raise ValueError("Invalid image file format.")
-#     img_resized = cv2.resize(img_gray, TARGET_SIZE)
-#     img_norm = img_resized.astype(np.float32) / 255.0
-#     input_tensor = np.expand_dims(np.expand_dims(img_norm, axis=-1), axis=0) # (1, 224, 224, 1)
 
-#     # 2. For visualization overlay: Need a color base (H, W, 3)
-#     img_rgb_base = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2RGB)
-#     img_rgb_base_resized = cv2.resize(img_rgb_base, TARGET_SIZE)
+def find_last_conv_layer(model: tf.keras.Model) -> str:
+    """Recursively searches a Keras model and returns the name of the very last Conv2D layer."""
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            return layer.name
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, tf.keras.layers.Conv2D):
+                    return sub_layer.name
+    raise ValueError("No Conv2D layer found in the provided model architecture.")
 
-#     return input_tensor, img_rgb_base_resized
 
-# # --- ENDPOINT: Predict & Grad-CAM ---
-# @app.post("/predict_with_gradcam")
-# async def predict_with_gradcam(file: UploadFile = File(...)):
-#     """Accepts an uploaded X-ray image (PNG/JPG/JPEG).
-#     Returns JSON containing prediction stats AND the base64-encoded Grad-CAM image.
-#     """
-#     model = app.state.model
-#     if model is None:
-#         raise HTTPException(status_code=500, detail="Model failed to load on startup.")
+def generate_gradcam_heatmap(
+    model: tf.keras.Model,
+    input_tensor: tf.Tensor,
+    last_conv_layer_name: Optional[str] = None,
+    target_mode: str = "fracture_only",
+) -> np.ndarray:
+    """Computes Grad-CAM heatmap for a binary classification model (Sigmoid)."""
+    if last_conv_layer_name is None:
+        last_conv_layer_name = find_last_conv_layer(model)
 
-#     # Read bytes
-#     contents = await file.read()
+    grad_model = tf.keras.models.Model(
+        inputs=model.inputs,
+        outputs=[
+            model.get_layer(last_conv_layer_name).output,
+            model.output,
+        ],
+    )
 
-#     try:
-#         # Get processed input for model, and raw background for overlay
-#         input_tensor, rgb_overlay_base = preprocess_for_gradcam(contents)
-#     except Exception as e:
-#         raise HTTPException(status_code=400, detail=f"Failed to process image: {str(e)}")
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(input_tensor)
+        pred_score = predictions[:, 0]
 
-#     # 1. Run inference
-#     pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
-#     has_fracture = bool(pred_prob >= 0.5)
+        if target_mode == "winning_class":
+            loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
+        else:
+            loss = pred_score
 
-#     # 2. Generate Grad-CAM visualization
-#     try:
-#         # A. Generate the raw heatmap (numpy array)
-#         heatmap = generate_gradcam_heatmap(model, input_tensor, LAST_CONV_LAYER_NAME)
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-#         # B. Superimpose heatmap onto the original RGB-base image
-#         # Assuming overlay_gradcam returns (superimposed_img_rgb, raw_heatmap_jet)
-#         gradcam_rgb, _ = overlay_gradcam(rgb_overlay_base, heatmap, alpha=0.4)
-#     except Exception as e:
-#         # Fallback if Grad-CAM fails, don't crash the prediction
-#         print(f"Warning: Grad-CAM failed: {e}")
-#         gradcam_rgb = rgb_overlay_base # Or None
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
 
-#     # 3. Encode the resultant RGB Grad-CAM image to Base64 string
-#     base64_str = ""
-#     if gradcam_rgb is not None:
-#         # Convert RGB to BGR for OpenCV encoding to PNG/JPG
-#         gradcam_bgr = cv2.cvtColor(gradcam_rgb, cv2.COLOR_RGB2BGR)
+    heatmap = tf.maximum(heatmap, 0)
+    max_val = tf.reduce_max(heatmap)
 
-#         # Encode to PNG bytes in memory
-#         _, buffer = cv2.imencode('.png', gradcam_bgr)
+    if max_val > 0:
+        heatmap = heatmap / max_val
 
-#         # Convert bytes to Base64 bytes -> to standard UTF-8 string
-#         base64_str = base64.b64encode(buffer).decode('utf-8')
+    return heatmap.numpy()
 
-#     # 4. Return combined JSON response
-#     return {
-#         "filename": file.filename,
-#         "is_fracture": has_fracture,
-#         "prediction": "Fracture Detected" if has_fracture else "Normal",
-#         "fracture_probability": round(pred_prob, 4),
-#         "grad_cam_layer_targeted": LAST_CONV_LAYER_NAME,
-#         # Frontend can use this directly: <img src="data:image/png;base64,{{grad_cam_base64}}" />
-#         "grad_cam_base64": base64_str
-#     }
+
+def overlay_gradcam(
+    img_base_gray: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4
+) -> tuple[np.ndarray, np.ndarray]:
+    """Superimposes the Grad-CAM heatmap over the original grayscale image."""
+    img_resized = cv2.resize(img_base_gray, TARGET_SIZE)
+    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+
+    heatmap_resized = cv2.resize(heatmap, TARGET_SIZE)
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+
+    heatmap_jet_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_jet_rgb = cv2.cvtColor(heatmap_jet_bgr, cv2.COLOR_BGR2RGB)
+
+    superimposed_rgb = cv2.addWeighted(
+        img_rgb, 1 - alpha, heatmap_jet_rgb, alpha, 0
+    )
+    return superimposed_rgb, heatmap_jet_rgb
+
+
+def encode_image_to_base64(img_rgb: np.ndarray) -> str:
+    """Encodes an RGB NumPy array to a Base64 PNG string."""
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    _, buffer = cv2.imencode(".png", img_bgr)
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+# --- ENDPOINTS ---
+
+
+@app.post("/analyze")
+async def analyze_xray(
+    file: UploadFile = File(...),
+    task_type: str = Form(..., description="'classification' or 'segmentation'"),
+    model_choice: str = Form(..., description="'cnn', 'vgg', or 'yolo'"),
+    target_mode: str = Form(
+        "fracture_only", description="'fracture_only' or 'winning_class'"
+    ),
+):
+    """Main routing endpoint for X-ray analysis."""
+    contents = await file.read()
+
+    # ROUTE 1: CLASSIFICATION
+    if task_type.lower() == "classification":
+        if model_choice.lower() not in ["cnn", "vgg"]:
+            raise HTTPException(
+                status_code=400,
+                detail="For classification, model_choice must be 'cnn' or 'vgg'.",
+            )
+
+        model = MODELS.get(model_choice.lower())
+        if model is None:
+            raise HTTPException(
+                status_code=500, detail=f"Model '{model_choice}' is not loaded."
+            )
+
+        np_arr = np.frombuffer(contents, np.uint8)
+        img_gray = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid image file format."
+            )
+
+        input_tensor = preprocess_image_to_tensor(img_gray, TARGET_SIZE)
+
+        pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
+        has_fracture = bool(pred_prob >= 0.5)
+
+        gradcam_base64 = ""
+        last_conv_layer = ""
+        try:
+            last_conv_layer = find_last_conv_layer(model)
+            heatmap = generate_gradcam_heatmap(
+                model=model,
+                input_tensor=input_tensor,
+                last_conv_layer_name=last_conv_layer,
+                target_mode=target_mode,
+            )
+            overlay_rgb, _ = overlay_gradcam(img_gray, heatmap, alpha=0.4)
+            gradcam_base64 = encode_image_to_base64(overlay_rgb)
+        except Exception as e:
+            print(f"Warning: Grad-CAM failed: {e}")
+
+        return {
+            "task_type": "classification",
+            "model_used": model_choice.lower(),
+            "filename": file.filename,
+            "is_fracture": has_fracture,
+            "prediction_label": (
+                "Fracture Detected" if has_fracture else "Normal"
+            ),
+            "fracture_probability": round(pred_prob, 4),
+            "target_mode_used": target_mode,
+            "gradcam_layer": last_conv_layer,
+            "gradcam_base64": gradcam_base64,
+        }
+
+    # ROUTE 2: SEGMENTATION
+    elif task_type.lower() == "segmentation":
+        if model_choice.lower() != "yolo":
+            raise HTTPException(
+                status_code=400,
+                detail="For segmentation, model_choice must be 'yolo'.",
+            )
+
+        yolo_model = MODELS.get("yolo")
+        if yolo_model is None:
+            raise HTTPException(
+                status_code=500, detail="YOLO model is not loaded."
+            )
+
+        np_arr = np.frombuffer(contents, np.uint8)
+        raw_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if raw_img is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid image file format."
+            )
+
+        results = yolo_model(raw_img)[0]
+
+        boxes = []
+        for box in results.boxes:
+            coords = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            boxes.append(
+                {
+                    "box": [round(c, 2) for c in coords],
+                    "confidence": round(conf, 4),
+                    "class_id": cls_id,
+                }
+            )
+
+        annotated_bgr = results.plot()
+        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        segmented_base64 = encode_image_to_base64(annotated_rgb)
+
+        return {
+            "task_type": "segmentation",
+            "model_used": "yolo",
+            "filename": file.filename,
+            "detections_count": len(boxes),
+            "detected_boxes": boxes,
+            "segmented_image_base64": segmented_base64,
+        }
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid task_type. Choose either 'classification' or 'segmentation'.",
+        )
+
 
 @app.get("/check")
-def root(): return {"status": "ok"}
+def check_status():
+    return {
+        "status": "online",
+        "loaded_models": list(MODELS.keys()),
+    }
