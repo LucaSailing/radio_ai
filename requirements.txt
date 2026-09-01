@@ -13,16 +13,10 @@ google-cloud-storage
 scikit-learn
 tensorflow-macos==2.16.2; platform_system=='Darwin' and platform_machine=='arm64'
 tensorflow-metal==1.2.0; platform_system=='Darwin' and platform_machine=='arm64'
-tensorflow==2.16.2; platform_system!='Darwin' or platform_machine!='arm64'
+tensorflow[and-cuda]==2.16.2; platform_system!='Darwin' or platform_machine!='arm64'
 
 # YOLO (détection de fractures)
 ultralytics==8.4.136
-torchvision
-# torch : NON pinné ici volontairement — voir README, installé par machine
-#   Mac         : pip install torch==2.13.0
-#   Linux CPU   : pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
-#   Linux GPU   : pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cuXXX
-# (cuXXX = canal matchant `nvidia-smi` de la VM ; installer AVANT `pip install -r`)
 
 # API
 fastapi
