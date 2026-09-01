@@ -72,6 +72,6 @@ model/*
 !model/.gitkeep
 !processed_data/.gitkeep
 !raw_data/.gitkeep
-#*.ipynb
+*.ipynb
 *.zip
 *.csv
