@@ -172,5 +172,6 @@ def train_yolo():
     return model, metrics
 
 
+
 if __name__ == "__main__":
     train_yolo()

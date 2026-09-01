@@ -271,3 +271,63 @@ def attach_gcs_checkpoint_callback(model, run_name=RUN_NAME_YOLO, save_period=SA
             print(f"⚠️  Upload checkpoint GCS échoué (non bloquant) : {e}")
     model.add_callback("on_model_save", _on_model_save)
     return model
+
+def load_yolo_model_from_bucket(
+    blob_name: str = None,
+    local_dir: str = "/tmp/yolo_models",
+) -> YOLO:
+    """Downloads a YOLO model weight file (.pt) from GCS and instantiates the Ultralytics YOLO model.
+
+    If `blob_name` is None, it dynamically fetches the most recently updated .pt model
+    from the MODEL_BUCKET_PREFIX_YOLO path.
+
+    Parameters:
+    -----------
+    blob_name : str, optional
+        Specific path/filename in GCS bucket (e.g., 'models/yolo/yolov8n_fracture_20260831.pt').
+    local_dir : str, optional
+        Local cache directory to save the downloaded model weights before loading.
+
+    Returns:
+    --------
+    YOLO : Loaded Ultralytics YOLO model instance.
+    """
+    bucket = storage.Client().bucket(BUCKET_NAME)
+
+    # 1. If no specific blob name is provided, automatically locate the latest .pt model
+    if not blob_name:
+        blobs = list(
+            bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX_YOLO}/")
+        )
+        pt_blobs = [b for b in blobs if b.name.endswith(".pt")]
+
+        if not pt_blobs:
+            raise FileNotFoundError(
+                f"No '.pt' model checkpoints found in gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX_YOLO}/"
+            )
+
+        # Sort blobs by updated timestamp to grab the latest trained model
+        pt_blobs.sort(key=lambda b: b.updated, reverse=True)
+        target_blob = pt_blobs[0]
+        print(f"🔍 Found latest YOLO model on GCS: gs://{BUCKET_NAME}/{target_blob.name}")
+    else:
+        target_blob = bucket.blob(blob_name)
+        if not target_blob.exists():
+            raise FileNotFoundError(
+                f"Model blob 'gs://{BUCKET_NAME}/{blob_name}' does not exist."
+            )
+
+    # 2. Setup local destination path
+    local_path = Path(local_dir) / Path(target_blob.name).name
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 3. Download weights from GCS if not already cached locally
+    if not local_path.exists():
+        print(f"⬇️ Downloading YOLO weights from GCS to local path: {local_path}...")
+        target_blob.download_to_filename(str(local_path))
+        print("✅ Download completed.")
+    else:
+        print(f"⚡ Using locally cached model weights at: {local_path}")
+
+    # 4. Instantiate and return the YOLO model instance
+    return YOLO(str(local_path))

@@ -166,10 +166,6 @@ def evaluate_model(model, ds_test):
         print(f"  {name:12s} : {value:.4f}")
     return results
 
-
-
-
-
 def save_model(model, name="cnn_fracture"):
     """Sauvegarde le modèle horodaté dans le bucket GCS (dossier models/),
     pas en local. Passe par un fichier temporaire car model.save() ne peut pas
