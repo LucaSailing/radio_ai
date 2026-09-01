@@ -10,7 +10,7 @@ import tensorflow as tf
 # Import deep learning model loader functions from custom package
 from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
 #from radio_ai_package.ml_logic.models.model_VGG import load_vgg_model
-from radio_ai_package.ml_logic.models.model_yOLO import load_yolo_model_from_bucket
+from radio_ai_package.ml_logic.models.model_yolo import load_yolo_model_from_bucket
 
 # --- GLOBAL APP STATE & CONFIG ---
 MODELS = {}
