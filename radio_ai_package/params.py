@@ -19,6 +19,8 @@ RAW_DATA_DIR = BASE_DIR / "raw_data"
 # --- préfixes BUCKET GCS ----------------------------------------------------
 RAW_DATA_BUCKET_PREFIX = "raw_data"
 MODEL_BUCKET_PREFIX = "models"
+MODEL_BUCKET_PREFIX_YOLO = "models/yolo"
+CKPT_BUCKET_PREFIX_YOLO = os.environ.get("CKPT_BUCKET_PREFIX_YOLO", "checkpoints/yolo")
 
 # --- preprocessing (castés : tout sort du .env en string) -------------------
 IMG_SIZE = ( int(os.environ.get("IMG_SIZE_WIDTH")),
@@ -49,13 +51,23 @@ THRESHOLD = float(os.environ.get("THRESHOLD"))
 
 
 
+# =========================================================================
+# YOLO PARAMETERS
+# =========================================================================
 
+# --- hyperparamètres d'entraînement ---
+EPOCH_YOLO      = int(os.environ.get("EPOCH_YOLO", "50"))
+IMAGE_SIZE_YOLO = int(os.environ.get("IMAGE_SIZE_YOLO", "256"))
+PATIENCE_YOLO   = int(os.environ.get("PATIENCE_YOLO", "10"))
+BATCH_SIZE_YOLO = int(os.environ.get("BATCH_SIZE_YOLO", str(BATCH_SIZE)))  # défaut = batch CNN
 
+# --- poids de départ ---
+YOLO_WEIGHTS = os.environ.get("YOLO_WEIGHTS", "yolov8n.pt")
 
+# --- runtime (device / workers) ---
+DEVICE_YOLO  = os.environ.get("DEVICE_YOLO", "auto")      # "auto" | "cpu" | "cuda" | "0"
+WORKERS_YOLO = int(os.environ.get("WORKERS_YOLO", "0"))   # 0 sur CPU, >0 sur GPU
 
-
-#YOLO PARAMETERS
-EPOCH_YOLO = int(os.environ.get("EPOCH_YOLO"))
-IMAGE_SIZE_YOLO = int(os.environ.get("IMAGE_SIZE_YOLO"))
-PATIENCE_YOLO = int(os.environ.get("PATIENCE_YOLO"))
-YOLO = "yolov8n.pt"
+# --- sauvegarde / reprise ---
+SAVE_PERIOD_YOLO = int(os.environ.get("SAVE_PERIOD_YOLO", "5"))       # checkpoint tous les N epochs
+RUN_NAME_YOLO    = os.environ.get("RUN_NAME_YOLO", "fracture_yolov8n")  # <-- MANQUAIT : cause du crash
