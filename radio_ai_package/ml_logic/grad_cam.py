@@ -3,6 +3,7 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 import cv2
 from pathlib import Path
+import tensorflow as tf
 
 from radio_ai_package.ml_logic.performance_metrics import get_x_test, get_y_test, get_binary_predictions, get_confusion_matrix_metrics, get_confusion_matrix_indices
 
@@ -29,6 +30,31 @@ def get_image_sample(X_test, y_test=None, index=0):
     label = y_test[index] if y_test is not None else None
 
     return input_tensor, raw_image, label
+
+################ Transforming the image array into a 4D tensor #################
+def preprocess_image_to_tensor(
+    img_array: np.ndarray,
+    target_size: tuple = (224, 224),
+    num_channels: int = 1,
+) -> tf.Tensor:
+    """Converts a raw NumPy image array into a normalized 4D float32 input tensor.
+
+    Shape returned: (1, height, width, num_channels)
+    """
+    # 1. Resize image to model expected dimensions
+    img_resized = cv2.resize(img_array, target_size)
+
+    # 2. Normalize pixel values to [0.0, 1.0]
+    img_normalized = img_resized.astype(np.float32) / 255.0
+
+    # 3. Add channel dimension if single-channel grayscale (H, W) -> (H, W, 1)
+    if num_channels == 1 and len(img_normalized.shape) == 2:
+        img_normalized = np.expand_dims(img_normalized, axis=-1)
+
+    # 4. Add batch dimension (H, W, C) -> (1, H, W, C)
+    input_tensor = np.expand_dims(img_normalized, axis=0)
+
+    return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
 
 
 ######################## Generating the heatmap ################################
@@ -361,9 +387,9 @@ def plot_gradcam_confusion_matrix(
             ax.axis("off")
 
             # Title & Metadata Annotation
-            title_text = f"Prob: {pred_prob:.3f} | True: {true_lbl}"
+            title_text = f"Prob: {pred_prob[0]:.3f} | True: {true_lbl}"
             ax.set_title(
-                f"Idx: {idx} | Prob: {pred_prob:.3f} | True: {true_lbl}",
+                f"Idx: {idx} | Prob: {pred_prob[0]:.3f} | True: {true_lbl}",
                 fontsize=10,
                 fontweight="bold",
             )
