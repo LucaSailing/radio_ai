@@ -9,7 +9,7 @@ import tensorflow as tf
 
 # Import deep learning model loader functions from custom package
 from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
-#from radio_ai_package.ml_logic.models.model_VGG import load_vgg_model
+from radio_ai_package.ml_logic.models.model_vgg import load_vgg_model_from_bucket
 from radio_ai_package.ml_logic.models.model_yolo import load_yolo_model_from_bucket
 
 # --- GLOBAL APP STATE & CONFIG ---
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     print("Initializing server and preloading deep learning models into RAM...")
     try:
         MODELS["cnn"] = load_model_from_bucket()
-        MODELS["vgg"] = load_vgg_model()
+        MODELS["vgg"] = load_vgg_model_from_bucket()
         MODELS["yolo"] = load_yolo_model_from_bucket()
         print("All models (CNN, VGG, YOLO) loaded successfully!")
     except Exception as e:

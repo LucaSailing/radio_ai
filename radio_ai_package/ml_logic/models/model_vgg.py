@@ -8,6 +8,11 @@ from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.optimizers import Adam
 
 from radio_ai_package.params import IMG_SIZE, PATIENCE, LEARNING_RATE
+from pathlib import Path
+from tensorflow.keras.models import load_model
+from google.cloud import storage
+
+from radio_ai_package.params import BUCKET_NAME, MODEL_BUCKET_PREFIX_CNN
 
 
 def initialize_model_vgg(img_size=IMG_SIZE) -> Model:
@@ -53,3 +58,65 @@ def evaluate_model_vgg(model: Model, test_ds):
     metrics = model.evaluate(test_ds, return_dict=True)
     print(f"✅ Évaluation VGG16 — {metrics}")
     return metrics
+
+def load_vgg_model_from_bucket(
+    blob_name: str = None,
+    local_dir: str = "/tmp/vgg_models",
+) -> Model:
+    """Downloads a saved VGG Keras model (.h5 or .keras) from GCS and loads it into memory.
+
+    If `blob_name` is None, it automatically locates and loads the most recently updated
+    model file inside the MODEL_BUCKET_PREFIX_CNN folder on GCS.
+
+    Parameters:
+    -----------
+    blob_name : str, optional
+        Specific GCS blob path (e.g., 'models/cnn/vgg16_fracture_20260831.keras').
+    local_dir : str, optional
+        Local cache directory where the downloaded file will be temporarily stored.
+
+    Returns:
+    --------
+    Model : Loaded Keras VGG16 Model instance.
+    """
+    bucket = storage.Client().bucket(BUCKET_NAME)
+
+    # 1. Fetch latest model automatically if no specific blob_name provided
+    if not blob_name:
+        blobs = list(bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX_CNN}/"))
+        model_blobs = [
+            b for b in blobs if b.name.endswith(".keras") or b.name.endswith(".h5")
+        ]
+
+        if not model_blobs:
+            raise FileNotFoundError(
+                f"No '.keras' or '.h5' model files found under gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX_CNN}/"
+            )
+
+        # Sort by updated timestamp (newest first)
+        model_blobs.sort(key=lambda b: b.updated, reverse=True)
+        target_blob = model_blobs[0]
+        print(f"🔍 Found latest VGG model on GCS: gs://{BUCKET_NAME}/{target_blob.name}")
+    else:
+        target_blob = bucket.blob(blob_name)
+        if not target_blob.exists():
+            raise FileNotFoundError(
+                f"Model blob 'gs://{BUCKET_NAME}/{blob_name}' does not exist."
+            )
+
+    # 2. Prepare local cache path
+    local_path = Path(local_dir) / Path(target_blob.name).name
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 3. Download weights from GCS if not cached locally
+    if not local_path.exists():
+        print(f"⬇️ Downloading VGG model from GCS to local path: {local_path}...")
+        target_blob.download_to_filename(str(local_path))
+        print("✅ Download completed.")
+    else:
+        print(f"⚡ Using locally cached VGG model at: {local_path}")
+
+    # 4. Load Keras model
+    model = load_model(str(local_path))
+    print("✅ VGG16 model loaded successfully into memory.")
+    return model
