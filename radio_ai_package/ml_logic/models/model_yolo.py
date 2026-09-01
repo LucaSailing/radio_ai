@@ -84,6 +84,7 @@ def train_model_yolo(
             project=str(RAW_DATA_DIR / "yolo_runs"),
             name=run_name,
             exist_ok=True,             # dossier de run fixe (pas de -2, -3…) pour retrouver last.pt
+            deterministic=False,
         )
 
     mode = "repris" if resume else "démarré"
