@@ -32,13 +32,15 @@ from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
 
 def initialize_model():
 
-    def conv_block(filters):
+    def conv_block(filters, name_prefix=None):
+        conv_name = f"{name_prefix}_conv" if name_prefix else None
         return [
             layers.Conv2D(
                 filters,
                 (3, 3),
                 padding="same",
-                use_bias=False
+                use_bias=False,
+                name=conv_name  # Explicite name for target retrieval
             ),
             layers.BatchNormalization(),
             layers.Activation("relu"),
@@ -53,13 +55,12 @@ def initialize_model():
         layers.RandomTranslation(0.03, 0.03),
         layers.RandomContrast(0.10),
 
-        # CNN
+        # CNN blocks
         *conv_block(16),
         *conv_block(32),
         *conv_block(64),
-        *conv_block(128),
+        *conv_block(128, name_prefix="last_block"), # Last block explicitly named
 
-        # Remplace Flatten
         layers.GlobalAveragePooling2D(),
 
         layers.Dense(128, use_bias=False),
@@ -166,10 +167,6 @@ def evaluate_model(model, ds_test):
         print(f"  {name:12s} : {value:.4f}")
     return results
 
-
-
-
-
 def save_model(model, name="cnn_fracture"):
     """Sauvegarde le modèle horodaté dans le bucket GCS (dossier models/),
     pas en local. Passe par un fichier temporaire car model.save() ne peut pas
@@ -191,31 +188,23 @@ def save_model(model, name="cnn_fracture"):
     return gs_uri
 
 
-def _latest_model_blob(bucket):
-    """Retourne le blob du modèle le plus récent dans models/ (par nom, qui
-    contient l'horodatage -> tri alphabétique = tri chronologique)."""
-    blobs = [b for b in bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX}/")
-             if b.name.endswith(".keras")]
-    if not blobs:
-        raise FileNotFoundError(f"Aucun modèle .keras dans gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX}/")
-    return max(blobs, key=lambda b: b.name)   # nom horodaté -> le plus grand = le plus récent
+# Remplace par le nom exact de ton bucket GCS sans 'gs://'
+BUCKET_NAME = "radio-ai_bucket"
 
-
-def load_model_from_bucket(filename=None):
-    """Charge un modèle depuis le bucket. Si filename est None, prend le plus
-    récent. Télécharge dans un fichier temporaire puis keras.load_model.
-    Retourne le modèle Keras prêt à évaluer."""
+def load_model_from_bucket(
+    filename: str = "models/cnn_fracture_20260901-130524.keras",
+) -> keras.Model:
+    """Charge le modèle CNN spécifié depuis Google Cloud Storage."""
     storage_client = storage.Client()
     bucket = storage_client.bucket(BUCKET_NAME)
 
-    if filename:
-        blob = bucket.blob(f"{MODEL_BUCKET_PREFIX}/{filename}")
-        if not blob.exists():
-            raise FileNotFoundError(f"Modèle introuvable : {filename}")
-    else:
-        blob = _latest_model_blob(bucket)
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"Modèle introuvable sur GCS : gs://{BUCKET_NAME}/{filename}"
+        )
 
-    print(f"  Chargement du modèle : gs://{BUCKET_NAME}/{blob.name}")
+    print(f"Chargement du modèle CNN : gs://{BUCKET_NAME}/{blob.name}")
     with tempfile.TemporaryDirectory() as tmpdir:
         local_path = f"{tmpdir}/model.keras"
         blob.download_to_filename(local_path)

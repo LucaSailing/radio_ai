@@ -1,15 +1,17 @@
 # ============================================================================
-#  main.py — pipeline détection de fractures (radio_ai)
+#  main_vgg.py — pipeline détection de fractures via VGG16 (radio_ai)
 # ============================================================================
 
 import os
 
-# doit être défini AVANT l'import de tensorflow / google
+# Configuration TensorFlow / Logs (AVANT l'import de TF)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Remove CUDA_VISIBLE_DEVICES="-1" to allow GPU acceleration if available
+# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import sys
 import time
@@ -25,21 +27,21 @@ from radio_ai_package.params import *
 
 # --- data (Luca) ---
 from radio_ai_package.ml_logic.data import load_data
-from radio_ai_package.ml_logic.preprocessors.preprocessor_CNN import (
-    filtering,
-    preprocessing,
-)
+from radio_ai_package.ml_logic.preprocessors.preprocessor_vgg import build_vgg_dataset
 from radio_ai_package.ml_logic.viz import show_predictions, show_train_samples
 
-# --- modèle (Modibo / Merwan) ---
-from radio_ai_package.ml_logic.models.model_CNN import (
-    compile_model,
-    evaluate_model,
-    initialize_model,
-    load_model_from_bucket,
+# --- modèle VGG16 (Modibo / Merwan) ---
+from radio_ai_package.ml_logic.models.model_vgg import (
+    compile_model_vgg,
+    evaluate_model_vgg,
+    initialize_model_vgg,
+    train_model_vgg,
+    fine_tune_model_vgg,  # Added fine-tuning import
     save_model,
-    train_model,
-    warmup_cache,
+    load_model_from_bucket
+)
+from radio_ai_package.ml_logic.models.model_CNN import (
+    warmup_cache
 )
 
 # --- métriques (Mariana) ---
@@ -51,7 +53,6 @@ from radio_ai_package.ml_logic.performance_metrics import (
     get_confusion_matrix,
     get_predictions,
     get_roc_auc_analysis,
-    get_user_threshold,
     get_x_test,
     get_y_test,
     plot_pr_curve,
@@ -59,14 +60,13 @@ from radio_ai_package.ml_logic.performance_metrics import (
     pr_curve,
 )
 
-# --- grad-cam visualizations ---
+# --- Grad-CAM ---
 from radio_ai_package.ml_logic.grad_cam import plot_gradcam_confusion_matrix
 
 
 # ============================================================================
 #  Helpers d'affichage
 # ============================================================================
-
 
 def step(n, titre):
     print("\n" + "=" * 70)
@@ -75,8 +75,7 @@ def step(n, titre):
 
 
 def describe_dataset(df, nom):
-    """Stats d'un ensemble : taille, équilibre des classes, ventilation
-    classe × côté × projection."""
+    """Stats d'un ensemble : taille, équilibre des classes, ventilation."""
     n = len(df)
     print(f"\n  [{nom}] — {n} images")
     if n == 0:
@@ -84,12 +83,8 @@ def describe_dataset(df, nom):
         return
 
     d = df.copy()
-    d["main"] = (
-        d["laterality"].map({"L": "gauche", "R": "droite"}).fillna("inconnu")
-    )
-    d["vue"] = (
-        d["projection"].map({1: "frontale", 2: "laterale"}).fillna("autre")
-    )
+    d["main"] = d["laterality"].map({"L": "gauche", "R": "droite"}).fillna("inconnu")
+    d["vue"] = d["projection"].map({1: "frontale", 2: "laterale"}).fillna("autre")
 
     for classe in sorted(d["fracture_visible"].fillna(0).unique()):
         libelle = "fracture" if classe == 1 else "sain    "
@@ -108,8 +103,9 @@ def describe_dataset(df, nom):
 
 
 # ============================================================================
-#  ZONE DE LUCA — chargement
+#  ZONE DE LUCA — Chargement & Preprocessing VGG
 # ============================================================================
+
 def initialisation():
     t_start = time.time()
 
@@ -120,122 +116,108 @@ def initialisation():
     t0 = time.time()
     df = load_data()
     print(f"  ⏱  chargement df : {time.time() - t0:.1f}s")
-
-    print(f"\n  Dataset brut chargé : {len(df)} lignes, {df.shape[1]} colonnes")
-    print(f"  Mode : {DATA_MODE}  |  colonne chemins : {PATH_COL}")
-    print(
-        f"  Exemple de chemin   : ...{df[PATH_COL].sample(1).str[-40:].values[0]}"
-    )
     describe_dataset(df, "dataset brut")
 
     return df, t_start
 
 
-# ============================================================================
-#  ZONE DE MODIBO / MERWAN — preprocessing et modèle
-# ============================================================================
-
-
-def preproc(df):
-    step(2, "Filtrage des cas exploitables")
-    df_filtered_CNN = filtering(df)
-
-    retenus = len(df_filtered_CNN)
-    ecartes = len(df) - retenus
-    print(
-        f"\n  Retenus : {retenus}   |   Écartés : {ecartes}  ({ecartes / len(df):.1%} du brut)"
-    )
-    describe_dataset(df_filtered_CNN, "après filtrage")
-
-    step(3, "Découpage train / val / test")
-    # UN SEUL appel à preprocessing (sinon on écrase le cache du warmup)
-    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = (
-        preprocessing(df_filtered_CNN)
-    )
+def preproc_vgg(df):
+    step(2, "Préparation du dataset VGG16 (3 canaux, 224x224)")
+    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = build_vgg_dataset(df)
 
     print(f"\n  Remplissage du cache (mode : {DATA_MODE}) :")
     warmup_cache(train_ds, "train")
     warmup_cache(val_ds, "val")
 
-    describe_dataset(data_train, "TRAIN")
-    describe_dataset(data_val, "VAL")
-    describe_dataset(data_test, "TEST")
-
-    train_ids = set(data_train["patient_id"])
-    val_ids = set(data_val["patient_id"])
-    test_ids = set(data_test["patient_id"])
-
-    print("\n  Vérification split par patient :")
-    print(f"    patients train : {len(train_ids)}")
-    print(f"    patients val   : {len(val_ids)}")
-    print(f"    patients test  : {len(test_ids)}")
-    print(f"    overlap train∩val  : {len(train_ids & val_ids)}")
-    print(f"    overlap train∩test : {len(train_ids & test_ids)}")
-    print(f"    overlap val∩test   : {len(val_ids & test_ids)}")
+    describe_dataset(data_train, "TRAIN (VGG)")
+    describe_dataset(data_val, "VAL (VGG)")
+    describe_dataset(data_test, "TEST (VGG)")
 
     show_train_samples(data_train)
 
     return (train_ds, val_ds, test_ds), (data_train, data_val, data_test)
 
 
-def run_model_and_eval(train_ds, val_ds, test_ds, data_train, data_test):
+# ============================================================================
+#  ZONE MODIBO / MERWAN — Modèle VGG16
+# ============================================================================
 
-    step(4, "Modèle : entraînement ou chargement")
+def run_model_vgg(train_ds, val_ds, test_ds, data_train, data_test):
+    step(3, "Modèle VGG16 : entraînement ou chargement")
 
     history = None
     if RUN_MODE == "train":
-        model = initialize_model()
-        model = compile_model(model)
+        model = initialize_model_vgg()
+        model = compile_model_vgg(model)
         model.summary()
-        model, history = train_model(
+
+        # Phase 1: Transfer Learning (Frozen Base)
+        print("\n  --- Phase 1: Entraînement de la tête de classification ---")
+        model, history = train_model_vgg(
             model,
             train_ds,
             val_ds,
             y_train=data_train["fracture_visible"],
         )
-        save_model(model)  # sauvegarde UNIQUE, seulement après entraînement
         plot_training_history(history)
 
+        # Phase 2: Fine-Tuning (Unfreeze block5)
+        print("\n  --- Phase 2: Fine-Tuning (Dégel block5_conv1) ---")
+        try:
+            model, history_ft = fine_tune_model_vgg(
+                model=model,
+                train_ds=train_ds,
+                val_ds=val_ds,
+                epochs=15,
+                fine_tune_at="block5_conv1",
+                fine_tune_lr=1e-5,
+            )
+            plot_training_history(history_ft)
+        except Exception as e:
+            print(f"  ⚠️  Avertissement: Fine-tuning non exécuté: {e}")
+
+        # Save Final Optimized Model
+        save_model(model)
+
     elif RUN_MODE == "eval":
-        model = load_model_from_bucket(MODEL_TO_LOAD)  # None -> le plus récent
+        model = load_model_from_bucket(MODEL_TO_LOAD)
         print("  Mode évaluation : modèle chargé, pas d'entraînement")
 
     else:
-        sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r} (attendu 'train' or 'eval')")
+        sys.exit(f"RUN_MODE inconnu : {RUN_MODE!r}")
 
-    step(5, "Évaluation sur le test")
-    results = evaluate_model(model, test_ds)  # UNE SEULE évaluation
+    step(4, "Évaluation sur le dataset test")
+    results = evaluate_model_vgg(model, test_ds)
     show_predictions(model, data_test, test_ds)
 
     return model, history
 
 
 # ============================================================================
-#  ZONE DE MARIANA — performance détaillée & Grad-CAM
+#  ZONE MARIANA — Performance & Grad-CAM VGG
 # ============================================================================
 
-
 def visualisation_metriques(model, test_ds):
+    step(5, "Analyse détaillée des performances & Grad-CAM")
 
-    # seuil demandé UNE fois, puis propagé à toutes les métriques
     threshold = THRESHOLD
     preds = get_predictions(model, test_ds)
     y_test = get_y_test(test_ds)
     binary_preds = get_binary_predictions(preds, threshold)
 
-    # métriques sur prédictions binarisées
+    # Métriques
     get_confusion_matrix(y_test, binary_preds)
     confusion_matrix_display_predicted(y_test, binary_preds)
     comparing_metrics_predictions(y_test, binary_preds)
     get_classification_report(y_test, binary_preds)
 
-    # courbes sur probabilités continues (jamais binarisées)
+    # Courbes ROC / PR
     pr_curve(y_test, preds)
     plot_pr_curve(y_test, preds)
     get_roc_auc_analysis(y_test, preds)
 
-    # --- GRAD-CAM CONFUSION MATRIX GRID ---
-    print("\n  Generatique de la grille Grad-CAM Confusion Matrix (TP, TN, FP, FN)...")
+    # Grille Grad-CAM
+    print("\n  Génération de la grille Grad-CAM VGG16 (TP, TN, FP, FN)...")
     try:
         X_test = get_x_test(test_ds)
         plot_gradcam_confusion_matrix(
@@ -245,33 +227,28 @@ def visualisation_metriques(model, test_ds):
             preds=preds,
             binary_preds=binary_preds,
             alpha=0.4,
-            filename="gradcam_confusion_matrix.png",
+            filename="vgg_gradcam_confusion_matrix.png",
         )
     except Exception as e:
-        print(f"  ⚠️  Grad-CAM grid generation failed: {e}")
+        print(f"  ⚠️  Échec génération Grad-CAM VGG : {e}")
 
 
 # ============================================================================
-#  ZONE DE LUCA — recap & fin
+#  Main Execution
 # ============================================================================
 
-
-def conclusion(t_start):
+def main():
+    df, t_start = initialisation()
+    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preproc_vgg(df)
+    model, history = run_model_vgg(train_ds, val_ds, test_ds, data_train, data_test)
+    visualisation_metriques(model, test_ds)
 
     print("\n" + "=" * 70)
-    print("  PIPELINE TERMINÉ")
+    print("  PIPELINE VGG16 TERMINÉ")
     total = time.time() - t_start
-    print(
-        f"  Temps total du run : {total:.1f}s  ({total/60:.1f} min)  |  mode : {DATA_MODE}"
-    )
+    print(f"  Temps total : {total:.1f}s ({total/60:.1f} min)")
     print("=" * 70)
 
 
 if __name__ == "__main__":
-    df, t_start = initialisation()
-    (train_ds, val_ds, test_ds), (data_train, data_val, data_test) = preproc(df)
-    model, history = run_model_and_eval(
-        train_ds, val_ds, test_ds, data_train, data_test
-    )
-    visualisation_metriques(model, test_ds)
-    conclusion(t_start)
+    main()

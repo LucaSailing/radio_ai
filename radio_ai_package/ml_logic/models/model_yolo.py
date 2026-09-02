@@ -305,7 +305,6 @@ def attach_gcs_checkpoint_callback(model, run_name=RUN_NAME_YOLO, save_period=SA
     model.add_callback("on_model_save", _on_model_save)
     return model
 
-
 def load_yolo_model_from_bucket(
     blob_name: str = None,
     local_dir: str = "/tmp/yolo_models",

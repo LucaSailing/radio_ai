@@ -13,7 +13,7 @@ google-cloud-storage
 scikit-learn
 tensorflow-macos==2.16.2; platform_system=='Darwin' and platform_machine=='arm64'
 tensorflow-metal==1.2.0; platform_system=='Darwin' and platform_machine=='arm64'
-tensorflow[and-cuda]==2.16.2; platform_system!='Darwin' or platform_machine!='arm64'
+tensorflow==2.16.2; platform_system!='Darwin' or platform_machine!='arm64'
 
 # YOLO (détection de fractures)
 ultralytics==8.4.136
@@ -39,3 +39,4 @@ uvicorn
 # # API
 # fastapi   # API framework
 # uvicorn   # web server
+python-multipart
