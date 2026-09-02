@@ -257,18 +257,51 @@ def delete_checkpoint_from_gcs(run_name=RUN_NAME_YOLO):
 
 def attach_gcs_checkpoint_callback(model, run_name=RUN_NAME_YOLO, save_period=SAVE_PERIOD_YOLO):
     """Uploade last.pt vers GCS tous les `save_period` epochs (et au dernier).
-    on_model_save est appelé à CHAQUE epoch par Ultralytics — on filtre nous-mêmes."""
+    Sauvegarde AUSSI, en local, une copie horodatée du last.pt (par epoch) ET le
+    best.pt courant, AVANT l'upload — pour ne jamais dépendre de GCS.
+    on_model_save est appelé à CHAQUE epoch — on filtre nous-mêmes."""
+    import shutil
+
+    # Dossier local de secours (défini ici : aucune constante externe requise)
+    local_ckpt_dir = RAW_DATA_DIR / "yolo_runs" / "_checkpoints_backup" / run_name
+
     def _on_model_save(trainer):
+        epoch = getattr(trainer, "epoch", 0) + 1   # epoch est 0-indexé
+        is_last = epoch >= getattr(trainer, "epochs", epoch)
+        if not (save_period > 0 and (epoch % save_period == 0 or is_last)):
+            return
+
+        last_pt = getattr(trainer, "last", None) or Path(trainer.save_dir) / "weights" / "last.pt"
+        last_pt = Path(last_pt)
+
+        # --- 1) Sauvegarde LOCALE horodatée du last.pt (ne dépend d'aucun réseau) ---
         try:
-            epoch = getattr(trainer, "epoch", 0) + 1   # epoch est 0-indexé
-            is_last = epoch >= getattr(trainer, "epochs", epoch)
-            if save_period > 0 and (epoch % save_period == 0 or is_last):
-                last_pt = getattr(trainer, "last", None) or Path(trainer.save_dir) / "weights" / "last.pt"
-                uri = upload_checkpoint_to_gcs(last_pt, run_name)
-                if uri:
-                    print(f"⬆️  Checkpoint GCS (epoch {epoch}) : {uri}")
+            if last_pt.exists():
+                local_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                dst = local_ckpt_dir / f"epoch{epoch:03d}.pt"
+                shutil.copy(last_pt, dst)
+                print(f"💾 Checkpoint LOCAL (epoch {epoch}) : {dst}")
+        except Exception as e:
+            print(f"⚠️  Sauvegarde locale du last échouée (non bloquant) : {e}")
+
+        # --- 1bis) Sauvegarde LOCALE du best.pt (meilleur modèle à cet instant) ---
+        try:
+            best_pt = last_pt.parent / "best.pt"
+            if best_pt.exists():
+                local_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(best_pt, local_ckpt_dir / "best.pt")
+                print(f"💾 Best LOCAL (epoch {epoch}) : {local_ckpt_dir / 'best.pt'}")
+        except Exception as e:
+            print(f"⚠️  Sauvegarde locale du best échouée (non bloquant) : {e}")
+
+        # --- 2) Upload GCS du last.pt (comportement d'origine, inchangé) ---
+        try:
+            uri = upload_checkpoint_to_gcs(last_pt, run_name)
+            if uri:
+                print(f"⬆️  Checkpoint GCS (epoch {epoch}) : {uri}")
         except Exception as e:
             print(f"⚠️  Upload checkpoint GCS échoué (non bloquant) : {e}")
+
     model.add_callback("on_model_save", _on_model_save)
     return model
 
