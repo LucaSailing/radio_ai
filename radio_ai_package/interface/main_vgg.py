@@ -9,7 +9,9 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["GRPC_VERBOSITY"] = "ERROR"
 os.environ["GLOG_minloglevel"] = "2"
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+
+# Remove CUDA_VISIBLE_DEVICES="-1" to allow GPU acceleration if available
+# os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 import sys
 import time
@@ -34,11 +36,12 @@ from radio_ai_package.ml_logic.models.model_vgg import (
     evaluate_model_vgg,
     initialize_model_vgg,
     train_model_vgg,
+    fine_tune_model_vgg,  # Added fine-tuning import
+    save_model,
+    load_model_from_bucket
 )
 from radio_ai_package.ml_logic.models.model_CNN import (
-    save_model,
-    load_model_from_bucket,
-    warmup_cache,
+    warmup_cache
 )
 
 # --- métriques (Mariana) ---
@@ -148,14 +151,33 @@ def run_model_vgg(train_ds, val_ds, test_ds, data_train, data_test):
         model = compile_model_vgg(model)
         model.summary()
 
+        # Phase 1: Transfer Learning (Frozen Base)
+        print("\n  --- Phase 1: Entraînement de la tête de classification ---")
         model, history = train_model_vgg(
             model,
             train_ds,
             val_ds,
             y_train=data_train["fracture_visible"],
         )
-        save_model(model)
         plot_training_history(history)
+
+        # Phase 2: Fine-Tuning (Unfreeze block5)
+        print("\n  --- Phase 2: Fine-Tuning (Dégel block5_conv1) ---")
+        try:
+            model, history_ft = fine_tune_model_vgg(
+                model=model,
+                train_ds=train_ds,
+                val_ds=val_ds,
+                epochs=15,
+                fine_tune_at="block5_conv1",
+                fine_tune_lr=1e-5,
+            )
+            plot_training_history(history_ft)
+        except Exception as e:
+            print(f"  ⚠️  Avertissement: Fine-tuning non exécuté: {e}")
+
+        # Save Final Optimized Model
+        save_model(model)
 
     elif RUN_MODE == "eval":
         model = load_model_from_bucket(MODEL_TO_LOAD)

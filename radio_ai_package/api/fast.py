@@ -1,5 +1,6 @@
 import base64
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -8,6 +9,10 @@ import numpy as np
 import tensorflow as tf
 
 # Import deep learning model loader functions from custom package
+from radio_ai_package.ml_logic.grad_cam import (
+    find_last_conv_layer,
+    generate_gradcam_heatmap,
+)
 from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
 from radio_ai_package.ml_logic.models.model_vgg import load_vgg_model_from_bucket
 from radio_ai_package.ml_logic.models.model_yolo import load_yolo_model_from_bucket
@@ -67,96 +72,11 @@ def preprocess_image_to_tensor(
     img_resized = cv2.resize(img_gray, target_size)
     img_normalized = img_resized.astype(np.float32) / 255.0
 
-    # Expand dimensions to create 4D batch shape (1, 224, 224, 1)
-    input_tensor = np.expand_dims(
-        np.expand_dims(img_normalized, axis=-1), axis=0
-    )
+    if len(img_normalized.shape) == 2:
+        img_normalized = np.expand_dims(img_normalized, axis=-1)
+
+    input_tensor = np.expand_dims(img_normalized, axis=0)
     return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
-
-
-def find_last_conv_layer(model: tf.keras.Model) -> str:
-    """Recursively searches for the last Conv2D layer in flat or nested Keras models:
-    Identifies the NAME (a string) of the target convolutional layer to inspect."""
-    last_conv_name = None
-
-    for layer in model.layers:
-        if isinstance(layer, tf.keras.layers.Conv2D):
-            last_conv_name = layer.name
-        elif hasattr(layer, "layers"):
-            for sub_layer in layer.layers:
-                if isinstance(sub_layer, tf.keras.layers.Conv2D):
-                    last_conv_name = sub_layer.name
-
-    if last_conv_name is None:
-        raise ValueError(
-            "Could not find any Conv2D layer in the model architecture."
-        )
-
-    return last_conv_name
-
-
-def get_target_conv_layer_output(model: tf.keras.Model, layer_name: str):
-    """Retrieves the tensor output of a layer, handling nested sub-models seamlessly."""
-    try:
-        # Standard lookup on top-level model
-        return model.get_layer(layer_name).output
-    except ValueError:
-        # Nested lookup inside sub-models (e.g., base_model = VGG16)
-        for layer in model.layers:
-            if hasattr(layer, "get_layer"):
-                try:
-                    return layer.get_layer(layer_name).output
-                except ValueError:
-                    continue
-        raise ValueError(
-            f"Layer '{layer_name}' could not be located in model architecture."
-        )
-
-
-def generate_gradcam_heatmap(
-    model: tf.keras.Model,
-    input_tensor: tf.Tensor,
-    last_conv_layer_name: str | None = None,
-    target_mode: str = "fracture_only",
-) -> np.ndarray:
-    """Computes Grad-CAM heatmap supporting both flat custom CNNs and nested Transfer Learning models (VGG16)."""
-    if last_conv_layer_name is None:
-        last_conv_layer_name = find_last_conv_layer(model)
-
-    # Handle nested layer extraction for VGG16 / transfer learning base models
-    conv_layer_output = get_target_conv_layer_output(
-        model, last_conv_layer_name
-    )
-
-    # Build sub-model for gradient tracking
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[conv_layer_output, model.output],
-    )
-
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(input_tensor)
-        pred_score = predictions[:, 0]
-
-        if target_mode == "winning_class":
-            loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
-        else:
-            loss = pred_score
-
-    grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-
-    heatmap = tf.maximum(heatmap, 0.0)
-    max_val = tf.reduce_max(heatmap)
-
-    if max_val > 0:
-        heatmap = heatmap / max_val
-
-    return heatmap.numpy()
 
 
 def overlay_gradcam(
@@ -187,12 +107,58 @@ def encode_image_to_base64(img_rgb: np.ndarray) -> str:
     return base64.b64encode(buffer).decode("utf-8")
 
 
+def compute_iou(
+    box1: list[float], box2: list[float], eps: float = 1e-6
+) -> float:
+    """Computes Intersection over Union (IoU) between two boxes [xmin, ymin, xmax, ymax]."""
+    x_left = max(box1[0], box2[0])
+    y_top = max(box1[1], box2[1])
+    x_right = min(box1[2], box2[2])
+    y_bottom = min(box1[3], box2[3])
+
+    intersection = max(0.0, x_right - x_left) * max(0.0, y_bottom - y_top)
+    box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = box1_area + box2_area - intersection
+
+    return float(intersection / (union + eps))
+
+
+def parse_gt_label_file(
+    content: str, img_w: int, img_h: int
+) -> list[dict[str, any]]:
+    """Converts normalized YOLO label text [cls, x_ctr, y_ctr, w, h] to pixel coordinates."""
+    gt_boxes = []
+    lines = content.strip().split("\n")
+    for line in lines:
+        if not line.strip():
+            continue
+        parts = list(map(float, line.strip().split()))
+        cls_id = int(parts[0])
+        x_ctr, y_ctr, bw, bh = parts[1:5]
+
+        # Map normalized coordinates (0.0 - 1.0) to pixel bounds
+        xmin = (x_ctr - bw / 2) * img_w
+        ymin = (y_ctr - bh / 2) * img_h
+        xmax = (x_ctr + bw / 2) * img_w
+        ymax = (y_ctr + bh / 2) * img_h
+
+        gt_boxes.append(
+            {
+                "class_id": cls_id,
+                "box": [round(xmin, 2), round(ymin, 2), round(xmax, 2), round(ymax, 2)],
+            }
+        )
+    return gt_boxes
+
+
 # --- API ENDPOINTS ---
 
 
 @app.post("/analyze")
 async def analyze_xray(
     file: UploadFile = File(...),
+    gt_file: Optional[UploadFile] = File(None),
     task_type: str = Form(
         ..., description="'classification' or 'segmentation'"
     ),
@@ -228,7 +194,7 @@ async def analyze_xray(
                 status_code=400, detail="Invalid image file format."
             )
 
-        # Preprocess grayscale image array to 4D tensor
+        # Preprocess grayscale image array to 4D tensor (1, 224, 224, 1)
         input_tensor = preprocess_image_to_tensor(img_gray, TARGET_SIZE)
 
         # Run binary classification inference
@@ -239,7 +205,11 @@ async def analyze_xray(
         gradcam_base64 = ""
         last_conv_layer = ""
         try:
-            last_conv_layer = find_last_conv_layer(model)
+            if model_choice.lower() == "vgg":
+                last_conv_layer = "block5_conv3"
+            else:
+                last_conv_layer = find_last_conv_layer(model)
+
             heatmap = generate_gradcam_heatmap(
                 model=model,
                 input_tensor=input_tensor,
@@ -289,24 +259,49 @@ async def analyze_xray(
                 status_code=400, detail="Invalid image file format."
             )
 
+        img_h, img_w, _ = raw_img.shape
+
+        # Parse Ground Truth file if sent by Streamlit
+        gt_boxes = []
+        if gt_file is not None:
+            gt_content = (await gt_file.read()).decode("utf-8")
+            gt_boxes = parse_gt_label_file(gt_content, img_w, img_h)
+
         # Run object detection inference
         results = yolo_model(raw_img)[0]
 
-        # Format detection bounding boxes
+        # Format detection bounding boxes and calculate per-box IoU
         boxes = []
         for box in results.boxes:
-            coords = box.xyxy[0].tolist()  # [xmin, ymin, xmax, ymax]
+            coords = [round(c, 2) for c in box.xyxy[0].tolist()]  # [xmin, ymin, xmax, ymax]
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
+
+            # Calculate IoU against ground truth boxes of the same class
+            best_iou = 0.0
+            for gt in gt_boxes:
+                if gt["class_id"] == cls_id:
+                    iou = compute_iou(coords, gt["box"])
+                    if iou > best_iou:
+                        best_iou = iou
+
             boxes.append(
                 {
-                    "box": [round(c, 2) for c in coords],
+                    "box": coords,
                     "confidence": round(conf, 4),
                     "class_id": cls_id,
+                    "matched_iou": round(best_iou, 4),
                 }
             )
 
-        # Plot bounding boxes onto image and encode back to Base64
+        # Calculate overall mean IoU
+        mean_iou = (
+            round(float(np.mean([b["matched_iou"] for b in boxes])), 4)
+            if (boxes and gt_boxes)
+            else 0.0
+        )
+
+        # Plot predicted bounding boxes onto image and encode back to Base64
         annotated_bgr = results.plot()
         annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
         segmented_base64 = encode_image_to_base64(annotated_rgb)
@@ -315,8 +310,11 @@ async def analyze_xray(
             "task_type": "segmentation",
             "model_used": "yolo",
             "filename": file.filename,
+            "image_dimensions": {"width": img_w, "height": img_h},
+            "ground_truth_boxes": gt_boxes,
             "detections_count": len(boxes),
             "detected_boxes": boxes,
+            "mean_iou": mean_iou,
             "segmented_image_base64": segmented_base64,
         }
 
