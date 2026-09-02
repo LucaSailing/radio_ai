@@ -140,27 +140,17 @@ def save_model(model, name="vgg_fracture"):
     print(f"  Modèle sauvegardé dans le bucket : {gs_uri}")
     return gs_uri
 
-
-def _latest_model_blob(bucket):
-    """Trouve le blob .keras le plus récent dans le préfixe des modèles."""
-    blobs = list(bucket.list_blobs(prefix=MODEL_BUCKET_PREFIX))
-    keras_blobs = [b for b in blobs if b.name.endswith(".keras")]
-    if not keras_blobs:
-        raise FileNotFoundError("Aucun modèle .keras trouvé dans le bucket GCS.")
-    return max(keras_blobs, key=lambda b: b.updated)
-
-
-def load_model_from_bucket(filename=None):
-    """Charge un modèle depuis le bucket. Si filename est None, prend le plus récent."""
+def load_vgg_model_from_bucket(
+    filename: str = "models/VGG/vgg16_fracture_20260902-145242.keras",
+):
     storage_client = storage.Client()
     bucket = storage_client.bucket(BUCKET_NAME)
 
-    if filename:
-        blob = bucket.blob(f"{MODEL_BUCKET_PREFIX}/{filename}")
-        if not blob.exists():
-            raise FileNotFoundError(f"Modèle introuvable : {filename}")
-    else:
-        blob = _latest_model_blob(bucket)
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"Modèle introuvable : gs://{BUCKET_NAME}/{filename}"
+        )
 
     print(f"  Chargement du modèle : gs://{BUCKET_NAME}/{blob.name}")
     with tempfile.TemporaryDirectory() as tmpdir:
