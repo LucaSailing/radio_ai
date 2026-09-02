@@ -1,41 +1,128 @@
 import base64
 from contextlib import asynccontextmanager
+import tempfile
 from typing import Optional
 
 import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from google.cloud import storage
 import numpy as np
 import tensorflow as tf
+from tensorflow import keras
+from ultralytics import YOLO
 
-# Import deep learning model loader functions from custom package
+# Import custom package logic for Grad-CAM
 from radio_ai_package.ml_logic.grad_cam import (
     find_last_conv_layer,
     generate_gradcam_heatmap,
 )
-from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
-from radio_ai_package.ml_logic.models.model_vgg import load_vgg_model_from_bucket
-from radio_ai_package.ml_logic.models.model_yolo import load_yolo_model_from_bucket
 
 # --- GLOBAL APP STATE & CONFIG ---
 MODELS = {}
+BUCKET_NAME = "radio-ai_bucket"
 TARGET_SIZE = (224, 224)
 
 
-# --- LIFESPAN MANAGER (Model Preloading & Cleanup) ---
+# --- INDIVIDUAL MODEL LOADERS FROM GCS ---
+
+
+def load_cnn_model_from_bucket(
+    filename: str = "models/cnn_fracture_20260901-130524.keras",
+) -> keras.Model:
+    """Loads the single CNN model directly from Google Cloud Storage."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"CNN model not found on GCS: gs://{BUCKET_NAME}/{filename}"
+        )
+
+    print(f"  Downloading CNN model: gs://{BUCKET_NAME}/{blob.name}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = f"{tmpdir}/cnn_model.keras"
+        blob.download_to_filename(local_path)
+        model = keras.models.load_model(local_path)
+
+    return model
+
+
+def load_vgg_model_from_bucket(
+    filename: str = "models/VGG/vgg16_fracture_20260902-145242.keras",
+) -> keras.Model:
+    """Loads the VGG model directly from Google Cloud Storage."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"VGG model not found on GCS: gs://{BUCKET_NAME}/{filename}"
+        )
+
+    print(f"  Downloading VGG model: gs://{BUCKET_NAME}/{blob.name}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = f"{tmpdir}/vgg_model.keras"
+        blob.download_to_filename(local_path)
+        model = keras.models.load_model(local_path)
+
+    return model
+
+
+def load_yolo_model_from_bucket(
+    filename: str = "models/YOLO/best.pt",
+) -> YOLO:
+    """Loads the YOLO object detection model directly from Google Cloud Storage."""
+    storage_client = storage.Client()
+    bucket = storage_client.bucket(BUCKET_NAME)
+
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"YOLO model not found on GCS: gs://{BUCKET_NAME}/{filename}"
+        )
+
+    print(f"  Downloading YOLO model: gs://{BUCKET_NAME}/{blob.name}")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_path = f"{tmpdir}/best.pt"
+        blob.download_to_filename(local_path)
+        model = YOLO(local_path)
+
+    return model
+
+
+# --- LIFESPAN MANAGER (Isolated Fault-Tolerant Loading) ---
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Preloads heavy deep learning models into RAM at server startup
-    and cleans up memory resources upon server shutdown.
-    """
-    print("Initializing server and preloading deep learning models into RAM...")
+    """Preloads CNN, VGG, and YOLO models into RAM at server startup with isolated exception handling."""
+    print("Initializing FastAPI server and loading models from Google Cloud Storage...")
+
+    # 1. Load CNN Model
     try:
-        MODELS["cnn"] = load_model_from_bucket()
-        MODELS["vgg"] = load_vgg_model_from_bucket()
-        MODELS["yolo"] = load_yolo_model_from_bucket()
-        print("All models (CNN, VGG, YOLO) loaded successfully!")
+        MODELS["cnn"] = load_cnn_model_from_bucket()
+        print("✅ CNN model loaded successfully.")
     except Exception as e:
-        print(f"Warning: Model preloading encountered an error: {e}")
+        print(f"❌ Warning: CNN model failed to load: {e}")
+
+    # 2. Load VGG Model
+    try:
+        MODELS["vgg"] = load_vgg_model_from_bucket()
+        print("✅ VGG model loaded successfully.")
+    except Exception as e:
+        print(f"❌ Warning: VGG model failed to load: {e}")
+
+    # 3. Load YOLO Model
+    try:
+        MODELS["yolo"] = load_yolo_model_from_bucket()
+        print("✅ YOLO model loaded successfully.")
+    except Exception as e:
+        print(f"❌ Warning: YOLO model failed to load: {e}")
+
+    print(f"Server initialization complete. Active models in memory: {list(MODELS.keys())}")
 
     yield  # API is live and accepting incoming client requests
 
@@ -50,7 +137,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS Middleware to allow Streamlit frontend requests from any origin
+# CORS Middleware to allow Streamlit frontend requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -61,14 +148,13 @@ app.add_middleware(
 
 
 # --- PREPROCESSING & HELPER FUNCTIONS ---
+
+
 def preprocess_image_to_tensor(
     img_gray: np.ndarray,
     target_size: tuple[int, int] = TARGET_SIZE,
 ) -> tf.Tensor:
-    """Converts a grayscale NumPy image array into a normalized 4D float32 input tensor.
-
-    Returned Shape: (1, height, width, 1)
-    """
+    """Converts a grayscale NumPy image array into a normalized 4D float32 input tensor."""
     img_resized = cv2.resize(img_gray, target_size)
     img_normalized = img_resized.astype(np.float32) / 255.0
 
@@ -89,11 +175,9 @@ def overlay_gradcam(
     heatmap_resized = cv2.resize(heatmap, TARGET_SIZE)
     heatmap_uint8 = np.uint8(255 * heatmap_resized)
 
-    # Convert single-channel heatmap into 3-channel JET color map
     heatmap_jet_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
     heatmap_jet_rgb = cv2.cvtColor(heatmap_jet_bgr, cv2.COLOR_BGR2RGB)
 
-    # Alpha blend original image with color map
     superimposed_rgb = cv2.addWeighted(
         img_rgb, 1 - alpha, heatmap_jet_rgb, alpha, 0
     )
@@ -137,7 +221,6 @@ def parse_gt_label_file(
         cls_id = int(parts[0])
         x_ctr, y_ctr, bw, bh = parts[1:5]
 
-        # Map normalized coordinates (0.0 - 1.0) to pixel bounds
         xmin = (x_ctr - bw / 2) * img_w
         ymin = (y_ctr - bh / 2) * img_h
         xmax = (x_ctr + bw / 2) * img_w
@@ -183,10 +266,10 @@ async def analyze_xray(
         model = MODELS.get(model_choice.lower())
         if model is None:
             raise HTTPException(
-                status_code=500, detail=f"Model '{model_choice}' is not loaded."
+                status_code=500,
+                detail=f"Model '{model_choice}' is not loaded in memory.",
             )
 
-        # Decode incoming byte stream into grayscale image matrix
         np_arr = np.frombuffer(contents, np.uint8)
         img_gray = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
         if img_gray is None:
@@ -194,14 +277,13 @@ async def analyze_xray(
                 status_code=400, detail="Invalid image file format."
             )
 
-        # Preprocess grayscale image array to 4D tensor (1, 224, 224, 1)
         input_tensor = preprocess_image_to_tensor(img_gray, TARGET_SIZE)
 
         # Run binary classification inference
         pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
         has_fracture = bool(pred_prob >= 0.5)
 
-        # Dynamically locate target layer and generate Grad-CAM visualization
+        # Compute Grad-CAM
         gradcam_base64 = ""
         last_conv_layer = ""
         try:
@@ -248,10 +330,9 @@ async def analyze_xray(
         yolo_model = MODELS.get("yolo")
         if yolo_model is None:
             raise HTTPException(
-                status_code=500, detail="YOLO model is not loaded."
+                status_code=500, detail="YOLO model is not loaded in memory."
             )
 
-        # Decode byte stream into 3-channel color image matrix for YOLO
         np_arr = np.frombuffer(contents, np.uint8)
         raw_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
         if raw_img is None:
@@ -261,23 +342,19 @@ async def analyze_xray(
 
         img_h, img_w, _ = raw_img.shape
 
-        # Parse Ground Truth file if sent by Streamlit
         gt_boxes = []
         if gt_file is not None:
             gt_content = (await gt_file.read()).decode("utf-8")
             gt_boxes = parse_gt_label_file(gt_content, img_w, img_h)
 
-        # Run object detection inference
         results = yolo_model(raw_img)[0]
 
-        # Format detection bounding boxes and calculate per-box IoU
         boxes = []
         for box in results.boxes:
-            coords = [round(c, 2) for c in box.xyxy[0].tolist()]  # [xmin, ymin, xmax, ymax]
+            coords = [round(c, 2) for c in box.xyxy[0].tolist()]
             conf = float(box.conf[0])
             cls_id = int(box.cls[0])
 
-            # Calculate IoU against ground truth boxes of the same class
             best_iou = 0.0
             for gt in gt_boxes:
                 if gt["class_id"] == cls_id:
@@ -294,14 +371,12 @@ async def analyze_xray(
                 }
             )
 
-        # Calculate overall mean IoU
         mean_iou = (
             round(float(np.mean([b["matched_iou"] for b in boxes])), 4)
             if (boxes and gt_boxes)
             else 0.0
         )
 
-        # Plot predicted bounding boxes onto image and encode back to Base64
         annotated_bgr = results.plot()
         annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
         segmented_base64 = encode_image_to_base64(annotated_rgb)
@@ -327,7 +402,7 @@ async def analyze_xray(
 
 @app.get("/check")
 def check_status():
-    """Health check endpoint to verify server status and loaded models."""
+    """Health check endpoint to verify server status and active models."""
     return {
         "status": "online",
         "loaded_models": list(MODELS.keys()),

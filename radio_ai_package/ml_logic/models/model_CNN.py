@@ -188,31 +188,23 @@ def save_model(model, name="cnn_fracture"):
     return gs_uri
 
 
-def _latest_model_blob(bucket):
-    """Retourne le blob du modèle le plus récent dans models/ (par nom, qui
-    contient l'horodatage -> tri alphabétique = tri chronologique)."""
-    blobs = [b for b in bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX}/")
-             if b.name.endswith(".keras")]
-    if not blobs:
-        raise FileNotFoundError(f"Aucun modèle .keras dans gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX}/")
-    return max(blobs, key=lambda b: b.name)   # nom horodaté -> le plus grand = le plus récent
+# Remplace par le nom exact de ton bucket GCS sans 'gs://'
+BUCKET_NAME = "radio-ai_bucket"
 
-
-def load_model_from_bucket(filename=None):
-    """Charge un modèle depuis le bucket. Si filename est None, prend le plus
-    récent. Télécharge dans un fichier temporaire puis keras.load_model.
-    Retourne le modèle Keras prêt à évaluer."""
+def load_model_from_bucket(
+    filename: str = "models/cnn_fracture_20260901-130524.keras",
+) -> keras.Model:
+    """Charge le modèle CNN spécifié depuis Google Cloud Storage."""
     storage_client = storage.Client()
     bucket = storage_client.bucket(BUCKET_NAME)
 
-    if filename:
-        blob = bucket.blob(f"{MODEL_BUCKET_PREFIX}/{filename}")
-        if not blob.exists():
-            raise FileNotFoundError(f"Modèle introuvable : {filename}")
-    else:
-        blob = _latest_model_blob(bucket)
+    blob = bucket.blob(filename)
+    if not blob.exists():
+        raise FileNotFoundError(
+            f"Modèle introuvable sur GCS : gs://{BUCKET_NAME}/{filename}"
+        )
 
-    print(f"  Chargement du modèle : gs://{BUCKET_NAME}/{blob.name}")
+    print(f"Chargement du modèle CNN : gs://{BUCKET_NAME}/{blob.name}")
     with tempfile.TemporaryDirectory() as tmpdir:
         local_path = f"{tmpdir}/model.keras"
         blob.download_to_filename(local_path)
