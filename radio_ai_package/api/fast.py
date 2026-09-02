@@ -21,7 +21,6 @@ TARGET_SIZE = (224, 224)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Preloads heavy deep learning models into RAM at server startup
-
     and cleans up memory resources upon server shutdown.
     """
     print("Initializing server and preloading deep learning models into RAM...")
@@ -57,8 +56,6 @@ app.add_middleware(
 
 
 # --- PREPROCESSING & HELPER FUNCTIONS ---
-
-
 def preprocess_image_to_tensor(
     img_gray: np.ndarray,
     target_size: tuple[int, int] = TARGET_SIZE,
@@ -71,24 +68,49 @@ def preprocess_image_to_tensor(
     img_normalized = img_resized.astype(np.float32) / 255.0
 
     # Expand dimensions to create 4D batch shape (1, 224, 224, 1)
-    input_tensor = np.expand_dims(np.expand_dims(img_normalized, axis=-1), axis=0)
+    input_tensor = np.expand_dims(
+        np.expand_dims(img_normalized, axis=-1), axis=0
+    )
     return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
 
 
 def find_last_conv_layer(model: tf.keras.Model) -> str:
-    """Recursively searches a Keras model architecture and returns the name
+    """Recursively searches for the last Conv2D layer in flat or nested Keras models:
+    Identifies the NAME (a string) of the target convolutional layer to inspect."""
+    last_conv_name = None
 
-    of the very last Conv2D layer found.
-    """
-    for layer in reversed(model.layers):
+    for layer in model.layers:
         if isinstance(layer, tf.keras.layers.Conv2D):
-            return layer.name
-        if hasattr(layer, "layers"):
-            for sub_layer in reversed(layer.layers):
+            last_conv_name = layer.name
+        elif hasattr(layer, "layers"):
+            for sub_layer in layer.layers:
                 if isinstance(sub_layer, tf.keras.layers.Conv2D):
-                    return sub_layer.name
+                    last_conv_name = sub_layer.name
 
-    raise ValueError("No Conv2D layer found in the provided model architecture.")
+    if last_conv_name is None:
+        raise ValueError(
+            "Could not find any Conv2D layer in the model architecture."
+        )
+
+    return last_conv_name
+
+
+def get_target_conv_layer_output(model: tf.keras.Model, layer_name: str):
+    """Retrieves the tensor output of a layer, handling nested sub-models seamlessly."""
+    try:
+        # Standard lookup on top-level model
+        return model.get_layer(layer_name).output
+    except ValueError:
+        # Nested lookup inside sub-models (e.g., base_model = VGG16)
+        for layer in model.layers:
+            if hasattr(layer, "get_layer"):
+                try:
+                    return layer.get_layer(layer_name).output
+                except ValueError:
+                    continue
+        raise ValueError(
+            f"Layer '{layer_name}' could not be located in model architecture."
+        )
 
 
 def generate_gradcam_heatmap(
@@ -97,23 +119,21 @@ def generate_gradcam_heatmap(
     last_conv_layer_name: str | None = None,
     target_mode: str = "fracture_only",
 ) -> np.ndarray:
-    """Computes Grad-CAM heatmap for a binary classification model (Sigmoid activation).
-
-    Accepts 4D input tensor shape: (1, H, W, C).
-    """
+    """Computes Grad-CAM heatmap supporting both flat custom CNNs and nested Transfer Learning models (VGG16)."""
     if last_conv_layer_name is None:
         last_conv_layer_name = find_last_conv_layer(model)
 
-    # Build sub-model mapping input tensor to [last conv output, final prediction score]
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[
-            model.get_layer(last_conv_layer_name).output,
-            model.output,
-        ],
+    # Handle nested layer extraction for VGG16 / transfer learning base models
+    conv_layer_output = get_target_conv_layer_output(
+        model, last_conv_layer_name
     )
 
-    # Compute target loss and calculate gradients w.r.t. feature maps
+    # Build sub-model for gradient tracking
+    grad_model = tf.keras.models.Model(
+        inputs=model.inputs,
+        outputs=[conv_layer_output, model.output],
+    )
+
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(input_tensor)
         pred_score = predictions[:, 0]
@@ -126,13 +146,11 @@ def generate_gradcam_heatmap(
     grads = tape.gradient(loss, conv_outputs)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    # Weight feature maps by pooled gradients
     conv_outputs = conv_outputs[0]
     heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
     heatmap = tf.squeeze(heatmap)
 
-    # Apply ReLU activation and normalize matrix between [0, 1]
-    heatmap = tf.maximum(heatmap, 0)
+    heatmap = tf.maximum(heatmap, 0.0)
     max_val = tf.reduce_max(heatmap)
 
     if max_val > 0:
@@ -175,7 +193,9 @@ def encode_image_to_base64(img_rgb: np.ndarray) -> str:
 @app.post("/analyze")
 async def analyze_xray(
     file: UploadFile = File(...),
-    task_type: str = Form(..., description="'classification' or 'segmentation'"),
+    task_type: str = Form(
+        ..., description="'classification' or 'segmentation'"
+    ),
     model_choice: str = Form(..., description="'cnn', 'vgg', or 'yolo'"),
     target_mode: str = Form(
         "fracture_only", description="'fracture_only' or 'winning_class'"

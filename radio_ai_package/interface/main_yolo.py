@@ -1,177 +1,306 @@
-"""
-main_yolo.py — pipeline de détection de fractures par YOLO (radio_ai)
-Miroir de main.py (CNN) : chargement des données, préparation du dataset YOLO,
-entraînement (reprenable, checkpoints synchronisés sur GCS), évaluation et
-rapport de suivi.
-"""
-import os
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")   # coupe oneDNN / cpu_feature_guard / cudart_stub
-os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # coupe le message oneDNN + non-déterminisme
-os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
-os.environ.setdefault("GLOG_minloglevel", "2")
-
-import warnings
-warnings.filterwarnings("ignore", category=FutureWarning, module="google.api_core")
-
+import base64
+from contextlib import asynccontextmanager
 from pathlib import Path
 
-from ultralytics import YOLO
+import cv2
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+import numpy as np
+import tensorflow as tf
 
-from radio_ai_package.params import RAW_DATA_DIR, RUN_NAME_YOLO, IMAGE_SIZE_YOLO
-from radio_ai_package.ml_logic.data import load_data  # adapte le nom si besoin
-from radio_ai_package.ml_logic.preprocessors.preprocessor_yolo import build_yolo_dataset
-from radio_ai_package.ml_logic.models.model_yolo import (
-    initialize_model_yolo,
-    train_model_yolo,
-    evaluate_model_yolo,
-    save_yolo_weights,
-    save_yolo_run,
-    download_checkpoint_from_gcs,
-    delete_checkpoint_from_gcs,
-    attach_gcs_checkpoint_callback,
+# Import deep learning model loader functions from custom package
+from radio_ai_package.ml_logic.models.model_CNN import load_model_from_bucket
+from radio_ai_package.ml_logic.models.model_vgg import load_vgg_model_from_bucket
+from radio_ai_package.ml_logic.models.model_yolo import load_yolo_model_from_bucket
+
+# --- GLOBAL APP STATE & CONFIG ---
+MODELS = {}
+TARGET_SIZE = (224, 224)
+
+
+# --- LIFESPAN MANAGER (Model Preloading & Cleanup) ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Preloads heavy deep learning models into RAM at server startup and cleans up memory resources upon server shutdown."""
+    print("Initializing server and preloading deep learning models into RAM...")
+    try:
+        MODELS["cnn"] = load_model_from_bucket()
+        MODELS["vgg"] = load_vgg_model_from_bucket()
+        MODELS["yolo"] = load_yolo_model_from_bucket()
+        print("All models (CNN, VGG, YOLO) loaded successfully!")
+    except Exception as e:
+        print(f"Warning: Model preloading encountered an error: {e}")
+
+    yield
+
+    print("Shutting down API server... clearing model memory.")
+    MODELS.clear()
+
+
+app = FastAPI(
+    title="GRAZPEDWRI-DX Fracture Diagnostics API",
+    description="Multi-task API for X-ray Classification (CNN/VGG + Grad-CAM) and Segmentation (YOLO)",
+    lifespan=lifespan,
 )
-from radio_ai_package.ml_logic.reporting.report_yolo import save_report_to_gcs
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-# ============================================================================
-#  Reprise (checkpoint local ou GCS)
-# ============================================================================
-
-def _local_last_pt(run_name=RUN_NAME_YOLO):
-    """Chemin local du last.pt du run."""
-    return RAW_DATA_DIR / "yolo_runs" / run_name / "weights" / "last.pt"
+# --- PREPROCESSING & HELPER FUNCTIONS ---
 
 
-def _is_resumable(ckpt_path):
-    """Un last.pt n'est reprenable que s'il garde l'état d'optimizer/epoch
-    (run INTERROMPU). Après un run TERMINÉ, Ultralytics strippe l'optimizer :
-    'resume=True' échouerait et repartirait en douce sur coco8/100 epochs.
-    On détecte ce cas ici pour ne jamais proposer une reprise impossible."""
-    try:
-        import torch
-        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        return ck.get("optimizer") is not None and ck.get("epoch", -1) >= 0
-    except Exception:
-        return False
+def preprocess_image_to_tensor(
+    img_gray: np.ndarray,
+    target_size: tuple[int, int] = TARGET_SIZE,
+    num_channels: int = 1,
+) -> tf.Tensor:
+    """Converts a grayscale NumPy image array into a normalized 4D float32 input tensor."""
+    img_resized = cv2.resize(img_gray, target_size)
+    img_normalized = img_resized.astype(np.float32) / 255.0
 
-
-def _prepare_resume(run_name=RUN_NAME_YOLO):
-    """
-    Détermine s'il faut reprendre, en cherchant un checkpoint local PUIS sur GCS,
-    puis en VÉRIFIANT qu'il est réellement reprenable. Retourne le chemin local
-    du checkpoint à reprendre, ou None si run frais.
-
-    Non interactif (pas de stdin) : run FRAIS par défaut.
-    """
-    local = _local_last_pt(run_name)
-
-    if not local.exists():
-        # Local vide (VM neuve ?) -> tenter GCS
-        restored = download_checkpoint_from_gcs(local, run_name)
-        if restored is not None:
-            print(f"⬇️  Checkpoint restauré depuis GCS : {restored}")
-        else:
-            return None  # rien nulle part -> run frais
-
-    # Un checkpoint local existe (d'origine ou restauré) : est-il reprenable ?
-    if not _is_resumable(local):
-        print(f"ℹ️  Checkpoint présent mais non reprenable (run déjà terminé) → run frais.")
-        return None
-
-    # Reprenable -> demander confirmation
-    try:
-        answer = input(f"⏸  Checkpoint reprenable trouvé ({local}). Reprendre ? [o/N] ").strip().lower()
-    except EOFError:
-        answer = "n"  # non interactif (GCP startup, CI) -> run FRAIS par défaut
-    return local if answer in ("o", "oui", "y", "yes") else None
-
-
-# ============================================================================
-#  Nettoyage post-run (évite toute reprise fantôme au prochain lancement)
-# ============================================================================
-
-def _cleanup_checkpoints(run_name=RUN_NAME_YOLO):
-    """Supprime le checkpoint reprenable (local + GCS) après un run mené à terme."""
-    local = _local_last_pt(run_name)
-    if local.exists():
-        local.unlink()
-        print(f"🧹 Checkpoint local supprimé (run terminé) : {local}")
-    try:
-        delete_checkpoint_from_gcs(run_name)
-    except Exception as e:
-        print(f"⚠️  Suppression checkpoint GCS échouée (non bloquant) : {e}")
-
-
-# ============================================================================
-#  Pipeline
-# ============================================================================
-
-def train_yolo():
-    """Charge les données, prépare le dataset, entraîne (reprise + checkpoints
-    GCS), évalue, sauvegarde le modèle et génère le rapport de suivi."""
-    df = load_data()
-
-    (yaml_path, dataset_dir), (data_train, data_val, data_test) = build_yolo_dataset(df)
-
-    # --- Reprise éventuelle (local ou GCS, seulement si réellement reprenable) ---
-    resume_ckpt = _prepare_resume()
-
-    if resume_ckpt is not None:
-        print(f"▶️  Reprise depuis {resume_ckpt}")
-        model = YOLO(resume_ckpt)
-        model = attach_gcs_checkpoint_callback(model)   # continue de synchroniser GCS
-        model, results = train_model_yolo(model, yaml_path, resume=True)
+    if num_channels == 3:
+        img_rgb = cv2.cvtColor(
+            np.uint8(255 * img_normalized), cv2.COLOR_GRAY2RGB
+        ).astype(np.float32) / 255.0
+        input_tensor = np.expand_dims(img_rgb, axis=0)
     else:
-        model = initialize_model_yolo()
-        model = attach_gcs_checkpoint_callback(model)   # synchronise last.pt -> GCS pendant le run
-        model, results = train_model_yolo(model, yaml_path, resume=False)
+        input_tensor = np.expand_dims(
+            np.expand_dims(img_normalized, axis=-1), axis=0
+        )
 
-    # --- Évaluation sur les MEILLEURS poids (cohérent avec le CNN) ---
-    best_weights = Path(results.save_dir) / "weights" / "best.pt"
-    model = YOLO(best_weights)
-    print(f"📦 Évaluation sur les meilleurs poids : {best_weights}")
+    return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
 
-    test_img_dir = dataset_dir / "images" / "test"
-    test_lbl_dir = dataset_dir / "labels" / "test"
-    metrics, df_eval = evaluate_model_yolo(model, test_img_dir, test_lbl_dir)
 
-    # --- Garde-fous de cohérence ---
-    if len(df_eval) != len(data_test):
-        print(f"⚠️  {len(df_eval)} images évaluées pour {len(data_test)} attendues (split test)")
-    if df_eval["y_true"].nunique() < 2:
-        print(f"⚠️  Une seule classe dans y_true {df_eval['y_true'].value_counts().to_dict()} → AUC = nan")
+def find_last_conv_layer(model: tf.keras.Model) -> str:
+    """Recursively searches a Keras model architecture and returns the name of the last Conv2D layer found."""
+    for layer in reversed(model.layers):
+        if isinstance(layer, tf.keras.layers.Conv2D):
+            return layer.name
+        if hasattr(layer, "layers"):
+            for sub_layer in reversed(layer.layers):
+                if isinstance(sub_layer, tf.keras.layers.Conv2D):
+                    return sub_layer.name
 
-    # --- Sauvegarde du modèle final (best.pt) : critique, on la laisse remonter ---
-    ts = None
-    try:
-        from datetime import datetime
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        save_yolo_weights(best_weights, timestamp=ts)
-    except Exception as e:
-        print(f"⚠️  Sauvegarde du best.pt échouée : {e}")
+    raise ValueError("No Conv2D layer found in the provided model architecture.")
 
-    # --- Sauvegardes accessoires (dossier de run + rapport) : NON fatales ---
-    #     un timeout GCS ici ne doit pas empêcher le nettoyage final.
-    for step_name, fn in [
-        ("run",    lambda: save_yolo_run(results.save_dir, timestamp=ts)),
-        ("report", lambda: save_report_to_gcs(
-                        model, metrics, df_eval,
-                        results_dir=results.save_dir,
-                        test_img_dir=test_img_dir,
-                        test_lbl_dir=test_lbl_dir,
-                        imgsz=IMAGE_SIZE_YOLO)),
-    ]:
+
+def generate_gradcam_heatmap(
+    model: tf.keras.Model,
+    input_tensor: tf.Tensor,
+    last_conv_layer_name: str | None = None,
+    target_mode: str = "fracture_only",
+) -> np.ndarray:
+    """Computes Grad-CAM heatmap for a binary classification model (Sigmoid activation)."""
+    if last_conv_layer_name is None:
+        last_conv_layer_name = find_last_conv_layer(model)
+
+    grad_model = tf.keras.models.Model(
+        inputs=model.inputs,
+        outputs=[
+            model.get_layer(last_conv_layer_name).output,
+            model.output,
+        ],
+    )
+
+    with tf.GradientTape() as tape:
+        conv_outputs, predictions = grad_model(input_tensor)
+        pred_score = predictions[:, 0]
+
+        if target_mode == "winning_class":
+            loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
+        else:
+            loss = pred_score
+
+    grads = tape.gradient(loss, conv_outputs)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    heatmap = tf.maximum(heatmap, 0.0)
+    max_val = tf.reduce_max(heatmap)
+
+    if max_val > 0:
+        heatmap = heatmap / max_val
+
+    return heatmap.numpy()
+
+
+def overlay_gradcam(
+    img_base_gray: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4
+) -> tuple[np.ndarray, np.ndarray]:
+    """Superimposes the Grad-CAM JET heatmap over the original grayscale image matrix."""
+    img_norm = (img_base_gray - img_base_gray.min()) / (
+        img_base_gray.max() - img_base_gray.min() + 1e-8
+    )
+    img_uint8 = np.uint8(255 * img_norm)
+    img_resized = cv2.resize(img_uint8, TARGET_SIZE)
+    img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB)
+
+    heatmap_resized = cv2.resize(heatmap, TARGET_SIZE)
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+
+    heatmap_jet_bgr = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_jet_rgb = cv2.cvtColor(heatmap_jet_bgr, cv2.COLOR_BGR2RGB)
+
+    superimposed_rgb = cv2.addWeighted(
+        img_rgb, 1 - alpha, heatmap_jet_rgb, alpha, 0
+    )
+    return superimposed_rgb, heatmap_jet_rgb
+
+
+def encode_image_to_base64(img_rgb: np.ndarray) -> str:
+    """Encodes an RGB NumPy image matrix to a Base64-encoded PNG string."""
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    _, buffer = cv2.imencode(".png", img_bgr)
+    return base64.b64encode(buffer).decode("utf-8")
+
+
+# --- API ENDPOINTS ---
+
+
+@app.post("/analyze")
+async def analyze_xray(
+    file: UploadFile = File(...),
+    task_type: str = Form(..., description="'classification' or 'segmentation'"),
+    model_choice: str = Form(..., description="'cnn', 'vgg', or 'yolo'"),
+    target_mode: str = Form(
+        "fracture_only", description="'fracture_only' or 'winning_class'"
+    ),
+):
+    """Main multi-task routing endpoint for X-ray classification and segmentation."""
+    contents = await file.read()
+
+    # ==========================================
+    # ROUTE 1: CLASSIFICATION (CNN or VGG + Grad-CAM)
+    # ==========================================
+    if task_type.lower() == "classification":
+        if model_choice.lower() not in ["cnn", "vgg"]:
+            raise HTTPException(
+                status_code=400,
+                detail="For classification, model_choice must be 'cnn' or 'vgg'.",
+            )
+
+        model = MODELS.get(model_choice.lower())
+        if model is None:
+            raise HTTPException(
+                status_code=500, detail=f"Model '{model_choice}' is not loaded."
+            )
+
+        np_arr = np.frombuffer(contents, np.uint8)
+        img_gray = cv2.imdecode(np_arr, cv2.IMREAD_GRAYSCALE)
+        if img_gray is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid image file format."
+            )
+
+        # Detect model channels (1 channel for Custom CNN, 3 channels for VGG)
+        model_channels = model.input_shape[-1] if model.input_shape[-1] else 1
+        input_tensor = preprocess_image_to_tensor(
+            img_gray, TARGET_SIZE, num_channels=model_channels
+        )
+
+        pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
+        has_fracture = bool(pred_prob >= 0.5)
+
+        gradcam_base64 = ""
+        last_conv_layer = ""
         try:
-            fn()
+            last_conv_layer = find_last_conv_layer(model)
+            heatmap = generate_gradcam_heatmap(
+                model=model,
+                input_tensor=input_tensor,
+                last_conv_layer_name=last_conv_layer,
+                target_mode=target_mode,
+            )
+            overlay_rgb, _ = overlay_gradcam(img_gray, heatmap, alpha=0.4)
+            gradcam_base64 = encode_image_to_base64(overlay_rgb)
         except Exception as e:
-            print(f"⚠️  Étape '{step_name}' échouée (non bloquant) : {e}")
+            print(f"Warning: Grad-CAM generation failed: {e}")
 
-    # --- Nettoyage : tourne TOUJOURS, même si une sauvegarde accessoire a échoué ---
-    _cleanup_checkpoints()
+        return {
+            "task_type": "classification",
+            "model_used": model_choice.lower(),
+            "filename": file.filename,
+            "is_fracture": has_fracture,
+            "prediction_label": (
+                "Fracture Detected" if has_fracture else "Normal"
+            ),
+            "fracture_probability": round(pred_prob, 4),
+            "target_mode_used": target_mode,
+            "gradcam_layer": last_conv_layer,
+            "gradcam_base64": gradcam_base64,
+        }
 
-    return model, metrics
+    # ==========================================
+    # ROUTE 2: SEGMENTATION (YOLO Localization)
+    # ==========================================
+    elif task_type.lower() == "segmentation":
+        if model_choice.lower() != "yolo":
+            raise HTTPException(
+                status_code=400,
+                detail="For segmentation, model_choice must be 'yolo'.",
+            )
+
+        yolo_model = MODELS.get("yolo")
+        if yolo_model is None:
+            raise HTTPException(
+                status_code=500, detail="YOLO model is not loaded."
+            )
+
+        np_arr = np.frombuffer(contents, np.uint8)
+        raw_img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if raw_img is None:
+            raise HTTPException(
+                status_code=400, detail="Invalid image file format."
+            )
+
+        results = yolo_model(raw_img)[0]
+
+        boxes = []
+        for box in results.boxes:
+            coords = box.xyxy[0].tolist()
+            conf = float(box.conf[0])
+            cls_id = int(box.cls[0])
+            boxes.append(
+                {
+                    "box": [round(c, 2) for c in coords],
+                    "confidence": round(conf, 4),
+                    "class_id": cls_id,
+                }
+            )
+
+        annotated_bgr = results.plot()
+        annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+        segmented_base64 = encode_image_to_base64(annotated_rgb)
+
+        return {
+            "task_type": "segmentation",
+            "model_used": "yolo",
+            "filename": file.filename,
+            "detections_count": len(boxes),
+            "detected_boxes": boxes,
+            "segmented_image_base64": segmented_base64,
+        }
+
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid task_type. Choose either 'classification' or 'segmentation'.",
+        )
 
 
-
-if __name__ == "__main__":
-    train_yolo()
+@app.get("/check")
+def check_status():
+    """Health check endpoint to verify server status and loaded models."""
+    return {
+        "status": "online",
+        "loaded_models": list(MODELS.keys()),
+    }
