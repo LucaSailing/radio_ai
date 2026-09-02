@@ -81,7 +81,7 @@ def generate_gradcam_heatmap(
     last_conv_layer_name: str | None = None,
     target_mode: str = "fracture_only",
 ) -> np.ndarray:
-    """Computes Grad-CAM heatmap supporting both flat CNNs and nested VGG16 architectures."""
+    """Computes Grad-CAM heatmap supporting flat multi-output CNNs and nested VGG16 architectures."""
 
     # 1. Check if model has a nested VGG base
     has_vgg = any("vgg16" in l.name.lower() for l in model.layers)
@@ -119,11 +119,18 @@ def generate_gradcam_heatmap(
                 x_head = layer(x_head)
 
             predictions = x_head
+
+            # Unpack predictions if model outputs a list/tuple
+            if isinstance(predictions, (list, tuple)):
+                predictions = predictions[0]
+
             pred_score = predictions[:, 0]
 
             if target_mode == "winning_class":
                 loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
-            else:
+            elif target_mode == "normal_only":
+                loss = 1.0 - pred_score
+            else:  # 'fracture_only' default
                 loss = pred_score
 
     else:
@@ -139,11 +146,18 @@ def generate_gradcam_heatmap(
 
         with tf.GradientTape() as tape:
             conv_outputs, predictions = grad_model(input_tensor)
+
+            # Unpack predictions if model outputs multiple tensors (e.g. classification + reconstruction)
+            if isinstance(predictions, (list, tuple)):
+                predictions = predictions[0]
+
             pred_score = predictions[:, 0]
 
             if target_mode == "winning_class":
                 loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
-            else:
+            elif target_mode == "normal_only":
+                loss = 1.0 - pred_score
+            else:  # 'fracture_only' default
                 loss = pred_score
 
     # Extract gradients & compute weighted heatmap
@@ -167,7 +181,15 @@ def generate_gradcam_heatmap(
 
 def overlay_gradcam(img_2d: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4):
     """Resizes heatmap to match image dimensions and overlays color map onto grayscale image."""
-    img_gray = img_2d.squeeze()
+    # Ensure array is 2D grayscale
+    img_gray = np.asarray(img_2d)
+    while img_gray.ndim > 2:
+        img_gray = img_gray.squeeze()
+        if img_gray.ndim == 3 and img_gray.shape[-1] == 1:
+            img_gray = img_gray[..., 0]
+        elif img_gray.ndim == 3 and img_gray.shape[-1] == 3:
+            img_gray = cv2.cvtColor(img_gray, cv2.COLOR_RGB2GRAY)
+            break
 
     # Safe 8-bit conversion
     if img_gray.max() <= 1.0:
@@ -218,13 +240,17 @@ def plot_gradcam_comparison(
         input_image = image
 
     input_tensor = tf.convert_to_tensor(input_image, dtype=tf.float32)
-    pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
+
+    preds = model.predict(input_tensor, verbose=0)
+    if isinstance(preds, (list, tuple)):
+        preds = preds[0]
+    pred_prob = float(preds[0][0])
 
     heatmap = generate_gradcam_heatmap(
         model, input_tensor, last_conv_layer_name=last_conv_layer_name
     )
 
-    overlay_img, _ = overlay_gradcam(image.squeeze(), heatmap, alpha=alpha)
+    overlay_img, _ = overlay_gradcam(image, heatmap, alpha=alpha)
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 

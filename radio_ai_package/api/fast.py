@@ -94,6 +94,11 @@ async def analyze(
     # 4) Model Prediction
     try:
         preds = model.predict(input_tensor)
+
+        # Unpack predictions if model returns multiple outputs as a list/tuple
+        if isinstance(preds, (list, tuple)):
+            preds = preds[0]
+
         fracture_prob = float(preds[0][0])
         is_fracture = fracture_prob >= 0.5
         label = "Fracture" if is_fracture else "Normal"
