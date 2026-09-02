@@ -32,13 +32,15 @@ from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
 
 def initialize_model():
 
-    def conv_block(filters):
+    def conv_block(filters, name_prefix=None):
+        conv_name = f"{name_prefix}_conv" if name_prefix else None
         return [
             layers.Conv2D(
                 filters,
                 (3, 3),
                 padding="same",
-                use_bias=False
+                use_bias=False,
+                name=conv_name  # Explicite name for target retrieval
             ),
             layers.BatchNormalization(),
             layers.Activation("relu"),
@@ -53,13 +55,12 @@ def initialize_model():
         layers.RandomTranslation(0.03, 0.03),
         layers.RandomContrast(0.10),
 
-        # CNN
+        # CNN blocks
         *conv_block(16),
         *conv_block(32),
         *conv_block(64),
-        *conv_block(128),
+        *conv_block(128, name_prefix="last_block"), # Last block explicitly named
 
-        # Remplace Flatten
         layers.GlobalAveragePooling2D(),
 
         layers.Dense(128, use_bias=False),
