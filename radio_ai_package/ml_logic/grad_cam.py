@@ -62,20 +62,15 @@ def find_last_conv_layer(model: tf.keras.Model) -> str:
     raise ValueError("No Conv2D layer found in the provided model architecture.")
 
 
-def get_target_conv_layer_output(model: tf.keras.Model, layer_name: str):
-    """Retrieves the tensor output of a layer, recursively traversing nested sub-models (e.g. VGG base)."""
+def find_vgg_base(model: tf.keras.Model) -> tf.keras.Model:
+    """Extracts the inner VGG16 base sub-model from the outer model."""
     try:
-        return model.get_layer(layer_name).output
+        return model.get_layer("vgg16")
     except ValueError:
         for layer in model.layers:
-            if hasattr(layer, "get_layer"):
-                try:
-                    return layer.get_layer(layer_name).output
-                except ValueError:
-                    continue
-        raise ValueError(
-            f"Layer '{layer_name}' could not be located in model architecture."
-        )
+            if "vgg16" in layer.name.lower() and hasattr(layer, "get_layer"):
+                return layer
+    raise ValueError("Could not locate nested VGG16 base model.")
 
 
 ######################## Generating the heatmap ################################
@@ -86,32 +81,72 @@ def generate_gradcam_heatmap(
     last_conv_layer_name: str | None = None,
     target_mode: str = "fracture_only",
 ) -> np.ndarray:
-    """Computes standard Grad-CAM heatmap supporting flat CNNs and nested Transfer Learning models (VGG16)."""
-    if last_conv_layer_name is None:
-        last_conv_layer_name = find_last_conv_layer(model)
+    """Computes Grad-CAM heatmap supporting both flat CNNs and nested VGG16 architectures."""
 
-    # Safely retrieve layer output tensor (handles nested sub-models)
-    conv_layer_output = get_target_conv_layer_output(model, last_conv_layer_name)
+    # 1. Check if model has a nested VGG base
+    has_vgg = any("vgg16" in l.name.lower() for l in model.layers)
 
-    grad_model = tf.keras.models.Model(
-        inputs=model.inputs,
-        outputs=[
-            conv_layer_output,
-            model.output,
-        ],
-    )
+    if has_vgg:
+        vgg_base = find_vgg_base(model)
+        if last_conv_layer_name is None:
+            last_conv_layer_name = "block5_conv3"
 
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(input_tensor)
-        pred_score = predictions[:, 0]
+        # Construct intermediate model mapping VGG inputs -> Target Conv layer output
+        target_conv = vgg_base.get_layer(last_conv_layer_name)
+        conv_sub_model = tf.keras.Model(inputs=vgg_base.inputs, outputs=target_conv.output)
 
-        if target_mode == "winning_class":
-            loss = tf.where(
-                pred_score >= 0.5, pred_score, 1.0 - pred_score
-            )
-        else:
-            loss = pred_score
+        with tf.GradientTape() as tape:
+            # Pass input through outer preprocessing layers (Concatenate, Lambda)
+            x = input_tensor
+            for layer in model.layers:
+                if layer == vgg_base:
+                    break
+                x = layer(x)
 
+            # Extract convolutional feature maps
+            conv_outputs = conv_sub_model(x)
+            tape.watch(conv_outputs)
+
+            # Forward pass through remaining VGG base layers after target conv layer
+            x_head = conv_outputs
+            start_idx = [l.name for l in vgg_base.layers].index(last_conv_layer_name) + 1
+            for layer in vgg_base.layers[start_idx:]:
+                x_head = layer(x_head)
+
+            # Forward pass through top classification head (GAP, Dense, Dropout, Output)
+            vgg_idx = model.layers.index(vgg_base)
+            for layer in model.layers[vgg_idx + 1:]:
+                x_head = layer(x_head)
+
+            predictions = x_head
+            pred_score = predictions[:, 0]
+
+            if target_mode == "winning_class":
+                loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
+            else:
+                loss = pred_score
+
+    else:
+        # Standard Flat Model Logic (Custom CNNs)
+        if last_conv_layer_name is None:
+            last_conv_layer_name = find_last_conv_layer(model)
+
+        conv_layer_output = model.get_layer(last_conv_layer_name).output
+        grad_model = tf.keras.models.Model(
+            inputs=model.inputs,
+            outputs=[conv_layer_output, model.output],
+        )
+
+        with tf.GradientTape() as tape:
+            conv_outputs, predictions = grad_model(input_tensor)
+            pred_score = predictions[:, 0]
+
+            if target_mode == "winning_class":
+                loss = tf.where(pred_score >= 0.5, pred_score, 1.0 - pred_score)
+            else:
+                loss = pred_score
+
+    # Extract gradients & compute weighted heatmap
     grads = tape.gradient(loss, conv_outputs)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
@@ -175,9 +210,6 @@ def plot_gradcam_comparison(
     figsize: tuple = (10, 5),
 ):
     """Generates and plots a side-by-side comparison of an original X-ray image and its Grad-CAM overlay."""
-    if last_conv_layer_name is None:
-        last_conv_layer_name = find_last_conv_layer(model)
-
     if len(image.shape) == 3:
         input_image = np.expand_dims(image, axis=0)
     elif len(image.shape) == 2:
@@ -187,8 +219,9 @@ def plot_gradcam_comparison(
 
     input_tensor = tf.convert_to_tensor(input_image, dtype=tf.float32)
     pred_prob = float(model.predict(input_tensor, verbose=0)[0][0])
+
     heatmap = generate_gradcam_heatmap(
-        model, input_tensor, last_conv_layer_name
+        model, input_tensor, last_conv_layer_name=last_conv_layer_name
     )
 
     overlay_img, _ = overlay_gradcam(image.squeeze(), heatmap, alpha=alpha)
@@ -227,9 +260,6 @@ def plot_gradcam_confusion_matrix(
 ):
     """Generates a 4x4 diagnostic grid of Grad-CAM heatmaps for TP, TN, FP, and FN categories."""
     viz_dir.mkdir(parents=True, exist_ok=True)
-
-    if last_conv_layer_name is None:
-        last_conv_layer_name = find_last_conv_layer(model)
 
     y_true = np.asarray(y_test).ravel().astype(int)
     y_probs = np.asarray(preds).ravel().astype(float)
@@ -294,7 +324,7 @@ def plot_gradcam_confusion_matrix(
 
             # Generate heatmap & construct overlay
             heatmap = generate_gradcam_heatmap(
-                model, input_tensor, last_conv_layer_name
+                model, input_tensor, last_conv_layer_name=last_conv_layer_name
             )
             overlay, _ = overlay_gradcam(img_gray, heatmap, alpha=alpha)
 
