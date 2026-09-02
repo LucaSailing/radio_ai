@@ -257,17 +257,111 @@ def delete_checkpoint_from_gcs(run_name=RUN_NAME_YOLO):
 
 def attach_gcs_checkpoint_callback(model, run_name=RUN_NAME_YOLO, save_period=SAVE_PERIOD_YOLO):
     """Uploade last.pt vers GCS tous les `save_period` epochs (et au dernier).
-    on_model_save est appelé à CHAQUE epoch par Ultralytics — on filtre nous-mêmes."""
+    Sauvegarde AUSSI, en local, une copie horodatée du last.pt (par epoch) ET le
+    best.pt courant, AVANT l'upload — pour ne jamais dépendre de GCS.
+    on_model_save est appelé à CHAQUE epoch — on filtre nous-mêmes."""
+    import shutil
+
+    # Dossier local de secours (défini ici : aucune constante externe requise)
+    local_ckpt_dir = RAW_DATA_DIR / "yolo_runs" / "_checkpoints_backup" / run_name
+
     def _on_model_save(trainer):
+        epoch = getattr(trainer, "epoch", 0) + 1   # epoch est 0-indexé
+        is_last = epoch >= getattr(trainer, "epochs", epoch)
+        if not (save_period > 0 and (epoch % save_period == 0 or is_last)):
+            return
+
+        last_pt = getattr(trainer, "last", None) or Path(trainer.save_dir) / "weights" / "last.pt"
+        last_pt = Path(last_pt)
+
+        # --- 1) Sauvegarde LOCALE horodatée du last.pt (ne dépend d'aucun réseau) ---
         try:
-            epoch = getattr(trainer, "epoch", 0) + 1   # epoch est 0-indexé
-            is_last = epoch >= getattr(trainer, "epochs", epoch)
-            if save_period > 0 and (epoch % save_period == 0 or is_last):
-                last_pt = getattr(trainer, "last", None) or Path(trainer.save_dir) / "weights" / "last.pt"
-                uri = upload_checkpoint_to_gcs(last_pt, run_name)
-                if uri:
-                    print(f"⬆️  Checkpoint GCS (epoch {epoch}) : {uri}")
+            if last_pt.exists():
+                local_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                dst = local_ckpt_dir / f"epoch{epoch:03d}.pt"
+                shutil.copy(last_pt, dst)
+                print(f"💾 Checkpoint LOCAL (epoch {epoch}) : {dst}")
+        except Exception as e:
+            print(f"⚠️  Sauvegarde locale du last échouée (non bloquant) : {e}")
+
+        # --- 1bis) Sauvegarde LOCALE du best.pt (meilleur modèle à cet instant) ---
+        try:
+            best_pt = last_pt.parent / "best.pt"
+            if best_pt.exists():
+                local_ckpt_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy(best_pt, local_ckpt_dir / "best.pt")
+                print(f"💾 Best LOCAL (epoch {epoch}) : {local_ckpt_dir / 'best.pt'}")
+        except Exception as e:
+            print(f"⚠️  Sauvegarde locale du best échouée (non bloquant) : {e}")
+
+        # --- 2) Upload GCS du last.pt (comportement d'origine, inchangé) ---
+        try:
+            uri = upload_checkpoint_to_gcs(last_pt, run_name)
+            if uri:
+                print(f"⬆️  Checkpoint GCS (epoch {epoch}) : {uri}")
         except Exception as e:
             print(f"⚠️  Upload checkpoint GCS échoué (non bloquant) : {e}")
+
     model.add_callback("on_model_save", _on_model_save)
     return model
+
+
+def load_yolo_model_from_bucket(
+    blob_name: str = None,
+    local_dir: str = "/tmp/yolo_models",
+) -> YOLO:
+    """Downloads a YOLO model weight file (.pt) from GCS and instantiates the Ultralytics YOLO model.
+
+    If `blob_name` is None, it dynamically fetches the most recently updated .pt model
+    from the MODEL_BUCKET_PREFIX_YOLO path.
+
+    Parameters:
+    -----------
+    blob_name : str, optional
+        Specific path/filename in GCS bucket (e.g., 'models/yolo/yolov8n_fracture_20260831.pt').
+    local_dir : str, optional
+        Local cache directory to save the downloaded model weights before loading.
+
+    Returns:
+    --------
+    YOLO : Loaded Ultralytics YOLO model instance.
+    """
+    bucket = storage.Client().bucket(BUCKET_NAME)
+
+    # 1. If no specific blob name is provided, automatically locate the latest .pt model
+    if not blob_name:
+        blobs = list(
+            bucket.list_blobs(prefix=f"{MODEL_BUCKET_PREFIX_YOLO}/")
+        )
+        pt_blobs = [b for b in blobs if b.name.endswith(".pt")]
+
+        if not pt_blobs:
+            raise FileNotFoundError(
+                f"No '.pt' model checkpoints found in gs://{BUCKET_NAME}/{MODEL_BUCKET_PREFIX_YOLO}/"
+            )
+
+        # Sort blobs by updated timestamp to grab the latest trained model
+        pt_blobs.sort(key=lambda b: b.updated, reverse=True)
+        target_blob = pt_blobs[0]
+        print(f"🔍 Found latest YOLO model on GCS: gs://{BUCKET_NAME}/{target_blob.name}")
+    else:
+        target_blob = bucket.blob(blob_name)
+        if not target_blob.exists():
+            raise FileNotFoundError(
+                f"Model blob 'gs://{BUCKET_NAME}/{blob_name}' does not exist."
+            )
+
+    # 2. Setup local destination path
+    local_path = Path(local_dir) / Path(target_blob.name).name
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # 3. Download weights from GCS if not already cached locally
+    if not local_path.exists():
+        print(f"⬇️ Downloading YOLO weights from GCS to local path: {local_path}...")
+        target_blob.download_to_filename(str(local_path))
+        print("✅ Download completed.")
+    else:
+        print(f"⚡ Using locally cached model weights at: {local_path}")
+
+    # 4. Instantiate and return the YOLO model instance
+    return YOLO(str(local_path))
