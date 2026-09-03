@@ -5,11 +5,7 @@ import numpy as np
 import tensorflow as tf
 
 from radio_ai_package.ml_logic.performance_metrics import (
-    get_binary_predictions,
     get_confusion_matrix_indices,
-    get_confusion_matrix_metrics,
-    get_x_test,
-    get_y_test,
 )
 
 ####################### Getting the image input ################################
@@ -38,13 +34,21 @@ def preprocess_image_to_tensor(
 ) -> tf.Tensor:
     """Converts a raw NumPy image array into a normalized 4D float32 input tensor (1, H, W, C)."""
     img_resized = cv2.resize(img_array, target_size)
-    img_normalized = img_resized.astype(np.float32) / 255.0
+    img_normalized = img_resized.astype(np.float32)
+
+    # Safe normalization check: scale to [0, 1] only if input is in [0, 255]
+    if img_normalized.max() > 1.0:
+        img_normalized = img_normalized / 255.0
 
     if num_channels == 1 and len(img_normalized.shape) == 2:
         img_normalized = np.expand_dims(img_normalized, axis=-1)
+    elif num_channels == 1 and img_normalized.ndim == 3 and img_normalized.shape[-1] != 1:
+        img_normalized = cv2.cvtColor(img_normalized, cv2.COLOR_RGB2GRAY)[..., np.newaxis]
 
-    input_tensor = np.expand_dims(img_normalized, axis=0)
-    return tf.convert_to_tensor(input_tensor, dtype=tf.float32)
+    if img_normalized.ndim == 3:
+        img_normalized = np.expand_dims(img_normalized, axis=0)
+
+    return tf.convert_to_tensor(img_normalized, dtype=tf.float32)
 
 
 ###################### Getting the last convolutional layer ####################
@@ -81,7 +85,7 @@ def generate_gradcam_heatmap(
     last_conv_layer_name: str | None = None,
     target_mode: str = "fracture_only",
 ) -> np.ndarray:
-    """Computes Grad-CAM heatmap supporting flat multi-output CNNs and nested VGG16 architectures."""
+    """Computes Grad-CAM heatmap supporting flat custom CNNs and nested VGG16 architectures."""
 
     # 1. Check if model has a nested VGG base
     has_vgg = any("vgg16" in l.name.lower() for l in model.layers)
@@ -96,31 +100,25 @@ def generate_gradcam_heatmap(
         conv_sub_model = tf.keras.Model(inputs=vgg_base.inputs, outputs=target_conv.output)
 
         with tf.GradientTape() as tape:
-            # Pass input through outer preprocessing layers (Concatenate, Lambda)
             x = input_tensor
             for layer in model.layers:
                 if layer == vgg_base:
                     break
                 x = layer(x)
 
-            # Extract convolutional feature maps
             conv_outputs = conv_sub_model(x)
             tape.watch(conv_outputs)
 
-            # Forward pass through remaining VGG base layers after target conv layer
             x_head = conv_outputs
             start_idx = [l.name for l in vgg_base.layers].index(last_conv_layer_name) + 1
             for layer in vgg_base.layers[start_idx:]:
                 x_head = layer(x_head)
 
-            # Forward pass through top classification head (GAP, Dense, Dropout, Output)
             vgg_idx = model.layers.index(vgg_base)
             for layer in model.layers[vgg_idx + 1:]:
                 x_head = layer(x_head)
 
             predictions = x_head
-
-            # Unpack predictions if model outputs a list/tuple
             if isinstance(predictions, (list, tuple)):
                 predictions = predictions[0]
 
@@ -134,20 +132,20 @@ def generate_gradcam_heatmap(
                 loss = pred_score
 
     else:
-        # Standard Flat Model Logic (Custom CNNs)
+        # Standard Flat Model Logic (Custom CNNs / Sequential)
         if last_conv_layer_name is None:
-            last_conv_layer_name = find_last_conv_layer(model)
+            last_conv_layer_name = "last_block_conv" if "last_block_conv" in [l.name for l in model.layers] else find_last_conv_layer(model)
 
-        conv_layer_output = model.get_layer(last_conv_layer_name).output
+        # Build symbolic feature extraction model
+        target_conv_layer = model.get_layer(last_conv_layer_name)
         grad_model = tf.keras.models.Model(
             inputs=model.inputs,
-            outputs=[conv_layer_output, model.outputs],
+            outputs=[target_conv_layer.output, model.output],
         )
 
         with tf.GradientTape() as tape:
             conv_outputs, predictions = grad_model(input_tensor)
 
-            # Unpack predictions if model outputs multiple tensors (e.g. classification + reconstruction)
             if isinstance(predictions, (list, tuple)):
                 predictions = predictions[0]
 
@@ -181,7 +179,6 @@ def generate_gradcam_heatmap(
 
 def overlay_gradcam(img_2d: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4):
     """Resizes heatmap to match image dimensions and overlays color map onto grayscale image."""
-    # Ensure array is 2D grayscale
     img_gray = np.asarray(img_2d)
     while img_gray.ndim > 2:
         img_gray = img_gray.squeeze()
@@ -197,14 +194,12 @@ def overlay_gradcam(img_2d: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4)
     else:
         img_uint8 = np.uint8(img_gray)
 
-    if len(img_uint8.shape) == 2:
-        img_rgb = cv2.cvtColor(img_uint8, cv2.COLOR_GRAY2RGB)
-    else:
-        img_rgb = img_uint8.copy()
+    img_rgb = cv2.cvtColor(img_uint8, cv2.COLOR_GRAY2RGB)
 
-    heatmap_norm = (heatmap - heatmap.min()) / (
-        heatmap.max() - heatmap.min() + 1e-8
-    )
+    heatmap_min = heatmap.min()
+    heatmap_max = heatmap.max()
+    denom = (heatmap_max - heatmap_min) if (heatmap_max - heatmap_min) > 0 else 1e-8
+    heatmap_norm = (heatmap - heatmap_min) / denom
 
     heatmap_resized = cv2.resize(
         heatmap_norm, (img_rgb.shape[1], img_rgb.shape[0])
@@ -232,14 +227,7 @@ def plot_gradcam_comparison(
     figsize: tuple = (10, 5),
 ):
     """Generates and plots a side-by-side comparison of an original X-ray image and its Grad-CAM overlay."""
-    if len(image.shape) == 3:
-        input_image = np.expand_dims(image, axis=0)
-    elif len(image.shape) == 2:
-        input_image = np.expand_dims(image, axis=(0, -1))
-    else:
-        input_image = image
-
-    input_tensor = tf.convert_to_tensor(input_image, dtype=tf.float32)
+    input_tensor = preprocess_image_to_tensor(image)
 
     preds = model.predict(input_tensor, verbose=0)
     if isinstance(preds, (list, tuple)):
@@ -254,7 +242,6 @@ def plot_gradcam_comparison(
 
     fig, axes = plt.subplots(1, 2, figsize=figsize)
 
-    # Original Image
     axes[0].imshow(image.squeeze(), cmap="gray")
     title_str = "Original X-Ray"
     if true_label is not None:
@@ -262,7 +249,6 @@ def plot_gradcam_comparison(
     axes[0].set_title(title_str)
     axes[0].axis("off")
 
-    # Heatmap Overlay
     axes[1].imshow(overlay_img)
     axes[1].set_title(f"Grad-CAM Heatmap (Pred Prob: {pred_prob:.2f})")
     axes[1].axis("off")
@@ -336,28 +322,17 @@ def plot_gradcam_confusion_matrix(
             true_lbl = int(y_true[idx].item() if hasattr(y_true[idx], "item") else y_true[idx])
             pred_prob = float(y_probs[idx].item() if hasattr(y_probs[idx], "item") else y_probs[idx])
 
-            if len(raw_img.shape) == 2:
-                input_tensor = np.expand_dims(raw_img, axis=(0, -1))
-                img_gray = raw_img
-            elif raw_img.shape[-1] == 1:
-                input_tensor = np.expand_dims(raw_img, axis=0)
-                img_gray = raw_img.squeeze(-1)
-            else:
-                input_tensor = np.expand_dims(raw_img, axis=0)
-                img_gray = cv2.cvtColor(raw_img, cv2.COLOR_RGB2GRAY)
-
-            input_tensor = tf.convert_to_tensor(input_tensor, dtype=tf.float32)
+            input_tensor = preprocess_image_to_tensor(raw_img)
 
             # Generate heatmap & construct overlay
             heatmap = generate_gradcam_heatmap(
                 model, input_tensor, last_conv_layer_name=last_conv_layer_name
             )
-            overlay, _ = overlay_gradcam(img_gray, heatmap, alpha=alpha)
+            overlay, _ = overlay_gradcam(raw_img, heatmap, alpha=alpha)
 
             ax.imshow(overlay)
             ax.axis("off")
 
-            # Title & Annotation
             ax.set_title(
                 f"Idx: {idx} | Prob: {pred_prob:.3f} | True: {true_lbl}",
                 fontsize=10,

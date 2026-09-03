@@ -30,36 +30,38 @@ from radio_ai_package.params import (IMG_SIZE, EPOCHS, PATIENCE, LEARNING_RATE,
 #     model.add(layers.Dense(1, activation='sigmoid'))     # proba de fracture
 #     return model
 
-def initialize_model():
+import tensorflow as tf
+from tensorflow.keras import layers, Sequential
+
+def initialize_model(img_size=(224, 224)):
 
     def conv_block(filters, name_prefix=None):
         conv_name = f"{name_prefix}_conv" if name_prefix else None
+        bn_name = f"{name_prefix}_bn" if name_prefix else None
+        act_name = f"{name_prefix}_act" if name_prefix else None
+        pool_name = f"{name_prefix}_pool" if name_prefix else None
+
         return [
             layers.Conv2D(
                 filters,
                 (3, 3),
                 padding="same",
                 use_bias=False,
-                name=conv_name  # Explicite name for target retrieval
+                name=conv_name  # Targeted layer: "last_block_conv"
             ),
-            layers.BatchNormalization(),
-            layers.Activation("relu"),
-            layers.MaxPooling2D(pool_size=(2, 2))
+            layers.BatchNormalization(name=bn_name),
+            layers.Activation("relu", name=act_name),
+            layers.MaxPooling2D(pool_size=(2, 2), name=pool_name)
         ]
 
     model = Sequential([
-        layers.Input(shape=(IMG_SIZE[0], IMG_SIZE[1], 1)),
+        layers.Input(shape=(img_size[0], img_size[1], 1)),
 
-        # Data augmentation
-        layers.RandomRotation(0.03),
-        layers.RandomTranslation(0.03, 0.03),
-        layers.RandomContrast(0.10),
-
-        # CNN blocks
+        # CNN blocks (Data augmentation removed from sequential wrapper)
         *conv_block(16),
         *conv_block(32),
         *conv_block(64),
-        *conv_block(128, name_prefix="last_block"), # Last block explicitly named
+        *conv_block(128, name_prefix="last_block"),  # Layer name will be "last_block_conv"
 
         layers.GlobalAveragePooling2D(),
 
@@ -68,7 +70,8 @@ def initialize_model():
         layers.Activation("relu"),
         layers.Dropout(0.3),
 
-        layers.Dense(1, activation="sigmoid")
+        # Final classification output
+        layers.Dense(1, activation="sigmoid", name="predictions")
     ])
 
     return model
