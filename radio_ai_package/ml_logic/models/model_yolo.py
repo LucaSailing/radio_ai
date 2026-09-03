@@ -342,12 +342,13 @@ def load_yolo_model_from_bucket(
         # Sort blobs by updated timestamp to grab the latest trained model
         pt_blobs.sort(key=lambda b: b.updated, reverse=True)
         target_blob = pt_blobs[0]
+        # target_blob = bucket.blob(f"{target_blob_version}/weights/best.pt")
         print(f"🔍 Found latest YOLO model on GCS: gs://{BUCKET_NAME}/{target_blob.name}")
     else:
-        target_blob = bucket.blob(blob_name)
+        target_blob = bucket.blob(f"{blob_name}/weights/best.pt")
         if not target_blob.exists():
             raise FileNotFoundError(
-                f"Model blob 'gs://{BUCKET_NAME}/{blob_name}' does not exist."
+                f"Model blob 'gs://{BUCKET_NAME}/{blob_name}/' does not exist."
             )
 
     # 2. Setup local destination path
@@ -361,6 +362,6 @@ def load_yolo_model_from_bucket(
         print("✅ Download completed.")
     else:
         print(f"⚡ Using locally cached model weights at: {local_path}")
-
+    model = YOLO(str(local_path))
     # 4. Instantiate and return the YOLO model instance
-    return YOLO(str(local_path))
+    return model
