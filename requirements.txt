@@ -1,4 +1,4 @@
-################# !!!!!!!!!!!  ATTENTION C'EST DEPENDANT DU PROCESSEUR   !!!!!!!!!!!!!
+################ !!!!!!!!!!!  ATTENTION C'EST DEPENDANT DU PROCESSEUR   !!!!!!!!!!!!!
 #### voir plus bas :
 # Mac
 # Linux CPU
@@ -21,22 +21,9 @@ ultralytics==8.4.136
 # API
 fastapi
 uvicorn
-
-
-#ANCIENNE VERSION A ELIMINER
-
-# python-dotenv
-# pandas
-# numpy
-# matplotlib
-# opencv-python
-# google-cloud-storage
-# scikit-learn
-# tensorflow-macos==2.16.2; platform_system=='Darwin' and platform_machine=='arm64'
-# tensorflow-metal==1.2.0; platform_system=='Darwin' and platform_machine=='arm64'
-# tensorflow==2.16.2; platform_system!='Darwin' or platform_machine!='arm64'
-
-# # API
-# fastapi   # API framework
-# uvicorn   # web server
 python-multipart
+
+# Added for Image Handling & Frontend
+pillow
+streamlit
+requests

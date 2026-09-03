@@ -155,7 +155,21 @@ def load_vgg_model_from_bucket(
     print(f"  Chargement du modèle : gs://{BUCKET_NAME}/{blob.name}")
     with tempfile.TemporaryDirectory() as tmpdir:
         local_path = f"{tmpdir}/model.keras"
-        blob.download_to_filename(local_path)
-        model = keras.models.load_model(local_path)
+        blob.download_to_filename(local_path)# Patch de la classe Lambda pour forcer la forme de sortie
+        class FixedLambda(layers.Lambda):
+            def __init__(self, *args, **kwargs):
+                kwargs["output_shape"] = lambda input_shape: input_shape
+                super().__init__(*args, **kwargs)
+
+            def compute_output_shape(self, input_shape):
+                return input_shape
+
+        custom_objects = {
+            "Lambda": FixedLambda,
+            "<lambda>": lambda img: preprocess_input(img * 255.0),
+            "preprocess_input": preprocess_input,
+        }
+
+        model = keras.models.load_model(local_path, custom_objects=custom_objects, compile=False, safe_mode=False)
 
     return model
