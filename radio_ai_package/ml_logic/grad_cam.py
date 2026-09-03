@@ -141,7 +141,7 @@ def generate_gradcam_heatmap(
         conv_layer_output = model.get_layer(last_conv_layer_name).output
         grad_model = tf.keras.models.Model(
             inputs=model.inputs,
-            outputs=[conv_layer_output, model.output],
+            outputs=[conv_layer_output, model.outputs],
         )
 
         with tf.GradientTape() as tape:
